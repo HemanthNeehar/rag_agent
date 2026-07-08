@@ -54,13 +54,13 @@ graph TD
     A2A_Client -->|A2A Task Request<br>+ RequestContext| A2A_Executor
     Playground -->|Direct query call / stream| ADK_App
 
-    A2A_Executor -->|Extract email/groups & .set()| Email_Var
-    A2A_Executor -->|Extract email/groups & .set()| Groups_Var
-    ADK_App -->|Extract email/groups & .set()| Email_Var
-    ADK_App -->|Extract email/groups & .set()| Groups_Var
+    A2A_Executor -->|"Extract email/groups & .set()"| Email_Var
+    A2A_Executor -->|"Extract email/groups & .set()"| Groups_Var
+    ADK_App -->|"Extract email/groups & .set()"| Email_Var
+    ADK_App -->|"Extract email/groups & .set()"| Groups_Var
 
-    Email_Var -->|.get() user identity| Redact_Layer
-    Groups_Var -->|.get() user identity| Redact_Layer
+    Email_Var -->|".get() user identity"| Redact_Layer
+    Groups_Var -->|".get() user identity"| Redact_Layer
     Agent_Rag --> Query_Tool
     Query_Tool -->|Retrieve raw chunks| Redact_Layer
 ```
