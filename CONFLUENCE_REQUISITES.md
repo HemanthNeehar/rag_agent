@@ -32,16 +32,16 @@ Use the following flowchart to select the correct authentication pattern for you
 
 ```mermaid
 graph TD
-    Start([Determine Confluence Auth Pattern]) --> CheckLicense{Atlassian Enterprise Plan?}
+    Start(["Determine Confluence Auth Pattern"]) --> CheckLicense{"Atlassian Enterprise Plan?"}
     
-    CheckLicense -->|Yes| SA_Option[Option 1: Native Atlassian Service Account<br>No paid user license required<br>Dedicated System API Token]
-    CheckLicense -->|No| Basic_Check{Basic Auth allowed by Security Policies?}
+    CheckLicense -->|Yes| SA_Option["Option 1: Native Atlassian Service Account<br>No paid user license required<br>Dedicated System API Token"]
+    CheckLicense -->|No| Basic_Check{"Basic Auth allowed by Security Policies?"}
     
-    Basic_Check -->|Yes| Tech_User[Option 2: Technical User Account<br>Paid human-seat license<br>CONFLUENCE_USERNAME + API_TOKEN]
-    Basic_Check -->|No| App_Check{Requires custom extension or purely serverless?}
+    Basic_Check -->|Yes| Tech_User["Option 2: Technical User Account<br>Paid human-seat license<br>CONFLUENCE_USERNAME + API_TOKEN"]
+    Basic_Check -->|No| App_Check{"Requires custom extension or purely serverless?"}
     
-    App_Check -->|OAuth API Gateway| OAuth_Mode[Option 3: Pure OAuth 2.0 Mode<br>App registration client credentials<br>OAUTH_CLIENT_ID + SECRET]
-    App_Check -->|Custom app deployment| Forge_App[Option 4: Atlassian Forge App<br>Runs asApp() inside Atlassian context<br>No credentials required in pipeline]
+    App_Check -->|OAuth API Gateway| OAuth_Mode["Option 3: Pure OAuth 2.0 Mode<br>App registration client credentials<br>OAUTH_CLIENT_ID + SECRET"]
+    App_Check -->|Custom app deployment| Forge_App["Option 4: Atlassian Forge App<br>Runs asApp() inside Atlassian context<br>No credentials required in pipeline"]
 ```
 
 ---
