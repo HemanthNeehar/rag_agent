@@ -1,0 +1,61 @@
+stages:
+  - ingest
+
+variables:
+  PYTHON_VERSION: "3.11-slim"
+
+# Scheduled Ingestion Job
+run_rag_ingestion:
+  stage: ingest
+  image: python:3.11-slim
+  only:
+    - schedules
+    - web  # Allows manual triggers from the GitLab dashboard
+  before_script:
+    # Install gcloud CLI and required packages
+    - apt-get update && apt-get install -y curl gnupg
+    - echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] http://packages.cloud.google.com/apt cloud-sdk main" | tee -a /etc/apt/sources.list.d/google-cloud-sdk.list
+    - curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key --keyring /usr/share/keyrings/cloud.google.gpg add -
+    - apt-get update && apt-get install -y google-cloud-cli
+    - pip install --upgrade pip
+    - pip install -r rag_agent/requirements.txt
+    - pip install pypdf python-docx python-pptx pandas openpyxl xlrd tabulate
+    
+    # Authenticate to GCP using GitLab variables
+    # (Either raw service account key JSON or using Workload Identity)
+    - echo "$GCP_SERVICE_ACCOUNT_KEY_JSON" > /tmp/gcp_sa_key.json
+    - gcloud auth activate-service-account --key-file=/tmp/gcp_sa_key.json
+    - export GOOGLE_APPLICATION_CREDENTIALS=/tmp/gcp_sa_key.json
+    
+  script:
+    - cd rag_agent
+    
+    # Inject variables from GitLab Secrets
+    - export RAG_GCS_BUCKET_NAME="$RAG_GCS_BUCKET_NAME"
+    - export VERTEX_PROJECT_ID="$GCP_PROJECT_ID"
+    - export VERTEX_LOCATION="$GCP_LOCATION"
+    - export RAG_ENGINE_ID="$RAG_ENGINE_ID"
+    - export GEMINI_MODEL="gemini-2.5-flash"
+    
+    - export CONFLUENCE_URL="$CONFLUENCE_URL"
+    - export CONFLUENCE_USERNAME="$CONFLUENCE_USERNAME"
+    - export CONFLUENCE_API_TOKEN="$CONFLUENCE_API_TOKEN"
+    - export CONFLUENCE_SPACES="$CONFLUENCE_SPACES"
+    
+    - export SHAREPOINT_INGEST_MODE="graph_api"
+    - export SHAREPOINT_INGEST_CONCURRENCY="5"
+    - export SHAREPOINT_TENANT_ID="$SHAREPOINT_TENANT_ID"
+    - export SHAREPOINT_CLIENT_ID="$SHAREPOINT_CLIENT_ID"
+    - export SHAREPOINT_CLIENT_SECRET="$SHAREPOINT_CLIENT_SECRET"
+    - export SHAREPOINT_SITE_SEARCH_QUERY="*"
+    
+    - echo "Executing SharePoint Crawl..."
+    - python ingest_sharepoint_gcs.py
+    
+    - echo "Executing Confluence Crawl..."
+    - python ingest_gcs.py
+    
+    - echo "Uploading and Indexing inside GCP Vertex RAG Engine..."
+    - python push_rag_engine.py
+  after_script:
+    - rm -f /tmp/gcp_sa_key.json

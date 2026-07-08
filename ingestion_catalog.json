@@ -1,0 +1,80 @@
+{
+  "confluence_917708": {
+    "version": 1,
+    "title": "Template - Troubleshooting article",
+    "filename": "Template_-_Troubleshooting_article.md",
+    "space_key": "AD"
+  },
+  "confluence_917681": {
+    "version": 1,
+    "title": "AI Docs",
+    "filename": "AI_Docs.md",
+    "space_key": "AD"
+  },
+  "confluence_917695": {
+    "version": 1,
+    "title": "Template - How-to guide",
+    "filename": "Template_-_How-to_guide.md",
+    "space_key": "AD"
+  },
+  "confluence_491521": {
+    "version": 1,
+    "title": "Mitigating 429 RESOURCE_EXHAUSTED Errors: Strategies and Advanced Measures for SDLC Multi-Agent Systems",
+    "filename": "Mitigating_429_RESOURCE_EXHAUSTED_Errors_Strategies_and_Advanced_Measures_for_SDLC_Multi-Agent_Systems.md",
+    "space_key": "AD"
+  },
+  "confluence_6356993": {
+    "version": 1,
+    "title": "Alpha Architecture",
+    "filename": "Alpha_Architecture.md",
+    "space_key": "AD"
+  },
+  "confluence_6520833": {
+    "version": 1,
+    "title": "April Microservices Architecture",
+    "filename": "April_Microservices_Architecture.md",
+    "space_key": "AD"
+  },
+  "confluence_5144578": {
+    "version": 1,
+    "title": "Google Next Announcements Overview",
+    "filename": "Google_Next_Announcements_Overview.md",
+    "space_key": "AD"
+  },
+  "confluence_6029313": {
+    "version": 1,
+    "title": "April Sales & Growth Analytics",
+    "filename": "April_Sales_&_Growth_Analytics.md",
+    "space_key": "AD"
+  },
+  "confluence_1540108": {
+    "version": 2,
+    "title": "Atomic Agent Blueprints for Multi-Agent Systems on Google Cloud\u2019s Agent Garden",
+    "filename": "Atomic_Agent_Blueprints_for_Multi-Agent_Systems_on_Google_Cloud\u2019s_Agent_Garden.md",
+    "space_key": "AD"
+  },
+  "confluence_229396": {
+    "version": 2,
+    "title": "Agent Design Patterns",
+    "filename": "Agent_Design_Patterns.md",
+    "space_key": "AD"
+  },
+  "confluence_1277953": {
+    "version": 3,
+    "title": "How A2A and MCP work together",
+    "filename": "How_A2A_and_MCP_work_together.md",
+    "space_key": "AD"
+  },
+  "confluence_1507329": {
+    "version": 1,
+    "title": "5 Multi-Agent Orchestration Patterns in ADK 2.0 for Enhanced Workflow Management",
+    "filename": "5_Multi-Agent_Orchestration_Patterns_in_ADK_2.0_for_Enhanced_Workflow_Management.md",
+    "space_key": "AD"
+  },
+  "confluence_1146887": {
+    "version": 2,
+    "title": "Agent Governance Stack: Treating AI Agent Fleet Like an Engineering Organization",
+    "filename": "Agent_Governance_Stack_Treating_AI_Agent_Fleet_Like_an_Engineering_Organization.md",
+    "space_key": "AD"
+  }
+}
