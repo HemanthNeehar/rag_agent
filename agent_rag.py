@@ -59,29 +59,47 @@ if gcs_sp_map_file.exists():
 
 # Load Permissions Map with GCS dynamic download fallback to ensure stateless resilience
 gcs_permissions_map: dict[str, dict] = {}
-gcs_perm_file = agent_dir / "gcs_permissions_map.json"
+bucket_name = os.getenv("RAG_GCS_BUCKET_NAME", "multi-agent-sdlc")
 
-if not gcs_perm_file.exists():
-    bucket_name = os.getenv("RAG_GCS_BUCKET_NAME", "multi-agent-sdlc")
-    try:
-        from google.cloud import storage
-        client = storage.Client(project=project_id)
-        bucket = client.bucket(bucket_name)
-        blob = bucket.blob("gcs_permissions_map.json")
-        if blob.exists():
-            blob.download_to_filename(str(gcs_perm_file))
-            print(f"[agent_rag] Successfully downloaded gcs_permissions_map.json from GCS bucket {bucket_name}", flush=True)
-    except Exception as e:
-        print(f"[agent_rag] Failed downloading gcs_permissions_map.json from GCS: {e}", flush=True)
+# We download and merge Confluence, SharePoint, and any legacy centralized maps
+permissions_files = {
+    "confluence": "gcs_confluence_permissions_map.json",
+    "sharepoint": "gcs_sharepoint_permissions_map.json",
+    "legacy": "gcs_permissions_map.json"
+}
 
-if gcs_perm_file.exists():
-    try:
-        import json
-        with open(gcs_perm_file, "r", encoding="utf-8") as f:
-            gcs_permissions_map = json.load(f)
-        print(f"[agent_rag] Loaded gcs_permissions_map.json with {len(gcs_permissions_map)} entry(s).", flush=True)
-    except Exception as e:
-        print(f"[agent_rag] Failed to load gcs_permissions_map.json: {e}", flush=True)
+try:
+    from google.cloud import storage
+    client = storage.Client(project=project_id)
+    bucket = client.bucket(bucket_name)
+    
+    for source_key, filename in permissions_files.items():
+        local_path = agent_dir / filename
+        # Download from GCS if not locally cached
+        if not local_path.exists():
+            try:
+                blob = bucket.blob(filename)
+                if blob.exists():
+                    blob.download_to_filename(str(local_path))
+                    print(f"[agent_rag] Successfully downloaded {filename} from GCS bucket {bucket_name}", flush=True)
+            except Exception as e:
+                print(f"[agent_rag] Failed downloading {filename} from GCS: {e}", flush=True)
+        
+        # Load and merge
+        if local_path.exists():
+            try:
+                import json
+                with open(local_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if isinstance(data, dict):
+                        gcs_permissions_map.update(data)
+                        print(f"[agent_rag] Loaded and merged {filename} with {len(data)} entry(s).", flush=True)
+            except Exception as e:
+                print(f"[agent_rag] Failed to load/parse {filename}: {e}", flush=True)
+
+except Exception as e:
+    print(f"[agent_rag] Failed to initialize storage client or load maps: {e}", flush=True)
+
 
 
 def check_user_access(filename: str, email: str, groups: list[str]) -> bool:

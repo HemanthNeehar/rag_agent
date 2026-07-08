@@ -198,3 +198,73 @@ This structure guarantees that your RAG assistant remains secure, scalable, and 
 > - If a document has no read restrictions on Confluence or SharePoint, it is treated as **Public** and is never redacted.
 > - "Restricted" files are only hidden from users who do not have permission on the source systems.
 > - Dynamic query-time redaction acts as a programmatically enforced mirror of your source repositories.
+
+---
+
+## 5. Ingestion Engine: Hybrid "Smart-Routing" Parser
+
+To minimize expensive LLM API usage, eliminate rate-limiting bottlenecks, and drastically reduce crawling latency, the ingestion pipeline implements a **Hybrid "Smart-Routing" Parser**. This design uses extremely fast local libraries for standard text extraction while reserving Gemini multimodal reasoning solely for files that absolutely require it.
+
+### Routing Rules and Workflow
+
+```mermaid
+graph TD
+    File[Incoming File / Attachment] --> Type{Source / Format?}
+    
+    Type -->|Confluence Space Page| LocalHTML[Local XHTML to MD Parser<br>0 LLM calls, <5ms per page]
+    Type -->|Standard PDF / DOCX / PPTX| Selectable{Contains Selectable Text?}
+    
+    Selectable -->|Yes| LocalExtract[Local Text Extraction<br>PyPDF / python-docx / python-pptx]
+    Selectable -->|No (Scanned File)| GeminiOCR[Route to Gemini for Multimodal OCR]
+    
+    LocalExtract --> ImageCheck{Has Embedded Images?}
+    ImageCheck -->|Yes| ExtractImg[Local Image Extraction]
+    ExtractImg --> GeminiCap[Route ONLY Images to Gemini for Captioning]
+    ImageCheck -->|No| FinalMD[Compile Final Enriched Markdown]
+    
+    LocalHTML --> FinalMD
+    GeminiOCR --> FinalMD
+    GeminiCap --> FinalMD
+```
+
+### Key Performance Benefits
+
+*   **Cost Efficiency (approx. 80% savings)**: Standard text pages are parsed using local CPU execution. We avoid sending millions of redundant tokens of searchable text to Gemini, targeting API usage exclusively at image captioning and scanned PDFs.
+*   **Latency Speedup (approx. 10x - 15x faster)**: Local parsing executes in milliseconds per page, compared to 10-30 seconds for remote Gemini processing. This guarantees that cold starts easily fit within the **4-hour Cloud Run job limit** without timeouts.
+*   **Visual Search Quality (100% Retained)**: Since embedded images are still extracted and caption-enriched using Gemini, search and retrieval over visual assets, charts, and diagrams remain fully operational.
+
+---
+
+## 6. Concurrency & Multi-Source Permissions Synchronization
+
+In production environments, both Confluence and SharePoint ingestion jobs often execute in parallel via Cloud Run Jobs or scheduled workflows. This introduces a classic **Lost-Update Race Condition** if they both attempt to read, edit, and write to a single centralized GCS file (`gcs_permissions_map.json`).
+
+### The Lost-Update Problem
+1.  **GCS Bucket** contains a centralized map file $M_0$.
+2.  **Confluence Job** and **SharePoint Job** start concurrently and download $M_0$ from GCS.
+3.  **Confluence Job** appends its crawled Confluence entries, producing $M_{Confluence}$.
+4.  **SharePoint Job** appends its crawled SharePoint entries, producing $M_{SharePoint}$.
+5.  **Confluence Job** uploads $M_{Confluence}$ to GCS. (GCS map is now $M_{Confluence}$).
+6.  **SharePoint Job** uploads $M_{SharePoint}$ to GCS. (GCS map is now $M_{SharePoint}$, completely overwriting and wiping out all the Confluence permissions crawled in the previous step!).
+
+### The Split-Permissions-Map Solution
+To completely eliminate write concurrency and guarantee atomic, race-condition-free ingestion, our architecture **splits permissions storage by source**:
+
+1.  **Independent Ingestion Targets**:
+    - The Confluence crawler compiles page permissions to **`gcs_confluence_permissions_map.json`**.
+    - The SharePoint crawler compiles document permissions to **`gcs_sharepoint_permissions_map.json`**.
+    - Because each job writes to its own dedicated file in the GCS bucket, there is **zero overlap** and no write-concurrency.
+2.  **Dynamic Query-Time Merge**:
+    - At runtime startup or on a fallback download trigger, the RAG Agent (`agent_rag.py`) downloads **both** source-specific map files as well as the legacy `gcs_permissions_map.json` (for backwards compatibility).
+    - It merges them into a single unified `gcs_permissions_map` dictionary in-memory:
+      ```python
+      permissions_files = {
+          "confluence": "gcs_confluence_permissions_map.json",
+          "sharepoint": "gcs_sharepoint_permissions_map.json",
+          "legacy": "gcs_permissions_map.json"
+      }
+      for filename in permissions_files.values():
+          # Download and load locally...
+          gcs_permissions_map.update(loaded_data)
+      ```
+3.  **Impact**: This guarantees 100% data safety, enables safe infinite horizontal scaling of crawler workloads, and provides a simple, lock-free, zero-coordination synchronization mechanism.

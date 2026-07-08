@@ -620,6 +620,22 @@ def _parse_excel_in_chunks_locally(file_path: Path, rows_per_chunk: int = 500):
             yield "", f"Failed to parse Excel locally: {ex}"
 
 
+def _is_pdf_searchable(file_path: Path) -> bool:
+    """Checks if a PDF contains selectable text (is searchable). Returns False if it is a scanned image PDF."""
+    try:
+        from pypdf import PdfReader
+        reader = PdfReader(file_path)
+        for i, page in enumerate(reader.pages):
+            if i >= 3:  # Only check up to first 3 pages
+                break
+            text = page.extract_text()
+            if text and len(text.strip()) > 20:
+                return True
+    except Exception as e:
+        print(f"      [Warning] _is_pdf_searchable check failed for {file_path.name}: {e}")
+    return False
+
+
 def parse_attachment_to_markdown(
     file_path: Path,
     gemini_client,
@@ -661,40 +677,45 @@ def parse_attachment_to_markdown(
     parsed_with_gemini = False
     content = ""
     
-    # We use Gemini as the primary high-fidelity parser for PDF
-    if gemini_client and ext in (".pdf",):
-        if ext == ".pdf":
+    # We use Gemini as the primary high-fidelity parser only for scanned / non-searchable PDF files
+    if gemini_client and ext == ".pdf":
+        is_searchable = _is_pdf_searchable(file_path)
+        if is_searchable:
+            print(f"     -> PDF {file_path.name} is searchable. Bypassing Gemini to parse locally (saves cost & latency)...")
+            content = _parse_pdf_locally(file_path)
+            parsed_with_gemini = False  # Bypassed Gemini
+        else:
+            print(f"     -> PDF {file_path.name} is scanned or non-searchable. Routing to Gemini for OCR parsing...")
             mime_type = "application/pdf"
-            
-        print(f"     -> Calling Gemini to parse {file_path.name}...")
-        model_name = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
-        prompt = (
-            "Please convert this document into a clean, structured Markdown representation. "
-            "Retain all text, convert all tables into standard markdown tables. "
-            "Do not include any HTML tags; use pure Markdown. Do not include markdown code block backticks surrounding the whole response."
-        )
-        try:
-            file_bytes = file_path.read_bytes()
-            with gemini_semaphore:
-                response = gemini_client.models.generate_content(
-                    model=model_name,
-                    contents=[
-                        types.Part.from_bytes(data=file_bytes, mime_type=mime_type),
-                        prompt
-                    ]
-                )
-            content = response.text or ""
-            if content.startswith("```markdown"):
-                content = content[11:]
-            if content.startswith("```"):
-                content = content[3:]
-            if content.endswith("```"):
-                content = content[:-3]
-            content = content.strip()
-            parsed_with_gemini = True
-            print(f"     -> Gemini parsed {file_path.name} successfully.")
-        except Exception as e:
-            print(f"     [Warning] Gemini parser failed for {file_path.name}: {e}. Falling back to local parse.")
+            print(f"     -> Calling Gemini to parse {file_path.name}...")
+            model_name = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+            prompt = (
+                "Please convert this document into a clean, structured Markdown representation. "
+                "Retain all text, convert all tables into standard markdown tables. "
+                "Do not include any HTML tags; use pure Markdown. Do not include markdown code block backticks surrounding the whole response."
+            )
+            try:
+                file_bytes = file_path.read_bytes()
+                with gemini_semaphore:
+                    response = gemini_client.models.generate_content(
+                        model=model_name,
+                        contents=[
+                            types.Part.from_bytes(data=file_bytes, mime_type=mime_type),
+                            prompt
+                        ]
+                    )
+                content = response.text or ""
+                if content.startswith("```markdown"):
+                    content = content[11:]
+                if content.startswith("```"):
+                    content = content[3:]
+                if content.endswith("```"):
+                    content = content[:-3]
+                content = content.strip()
+                parsed_with_gemini = True
+                print(f"     -> Gemini parsed {file_path.name} successfully.")
+            except Exception as e:
+                print(f"     [Warning] Gemini parser failed for {file_path.name}: {e}. Falling back to local parse.")
             
     # Local fallbacks
     if not parsed_with_gemini:
@@ -952,14 +973,14 @@ def download_state_from_gcs(bucket_name: str, local_catalog_path: Path, local_ma
         download_file_from_gcs(f"gs://{bucket_name}/sharepoint_catalog.json", str(local_catalog_path))
         download_file_from_gcs(f"gs://{bucket_name}/gcs_sharepoint_map.json", str(local_map_path))
         if local_perm_path:
-            download_file_from_gcs(f"gs://{bucket_name}/gcs_permissions_map.json", str(local_perm_path))
+            download_file_from_gcs(f"gs://{bucket_name}/gcs_sharepoint_permissions_map.json", str(local_perm_path))
         
         if local_catalog_path.exists():
             print(f"     -> Successfully downloaded sharepoint_catalog.json from gs://{bucket_name}")
         if local_map_path.exists():
             print(f"     -> Successfully downloaded gcs_sharepoint_map.json from gs://{bucket_name}")
         if local_perm_path and local_perm_path.exists():
-            print(f"     -> Successfully downloaded gcs_permissions_map.json from gs://{bucket_name}")
+            print(f"     -> Successfully downloaded gcs_sharepoint_permissions_map.json from gs://{bucket_name}")
     except Exception as e:
         print(f"     [Info] No existing SharePoint state found on GCS or error downloading: {e}")
 
@@ -974,8 +995,8 @@ def upload_state_to_gcs(bucket_name: str, local_catalog_path: Path, local_map_pa
             if upload_file_to_gcs(local_map_path, f"gs://{bucket_name}/gcs_sharepoint_map.json"):
                 print(f"     -> Uploaded gcs_sharepoint_map.json to gs://{bucket_name}")
         if local_perm_path and local_perm_path.exists():
-            if upload_file_to_gcs(local_perm_path, f"gs://{bucket_name}/gcs_permissions_map.json"):
-                print(f"     -> Uploaded gcs_permissions_map.json to gs://{bucket_name}")
+            if upload_file_to_gcs(local_perm_path, f"gs://{bucket_name}/gcs_sharepoint_permissions_map.json"):
+                print(f"     -> Uploaded gcs_sharepoint_permissions_map.json to gs://{bucket_name}")
     except Exception as e:
         print(f"     [Warning] Failed to upload state to GCS: {e}")
 
@@ -1697,7 +1718,7 @@ def fetch_graph_api_data(
                         try:
                             catalog_filepath = Path(__file__).parent / "sharepoint_catalog.json"
                             map_filepath = Path(__file__).parent / "gcs_sharepoint_map.json"
-                            perm_filepath = Path(__file__).parent / "gcs_permissions_map.json"
+                            perm_filepath = Path(__file__).parent / "gcs_sharepoint_permissions_map.json"
                             with open(catalog_filepath, "w", encoding="utf-8") as f:
                                 json.dump(catalog, f, indent=2)
                             with open(map_filepath, "w", encoding="utf-8") as f:
@@ -1744,7 +1765,7 @@ def main():
     # 2. Ingestion catalogs
     catalog_filepath = Path(__file__).parent / "sharepoint_catalog.json"
     map_filepath = Path(__file__).parent / "gcs_sharepoint_map.json"
-    perm_filepath = Path(__file__).parent / "gcs_permissions_map.json"
+    perm_filepath = Path(__file__).parent / "gcs_sharepoint_permissions_map.json"
     
     # Download state
     download_state_from_gcs(bucket_name, catalog_filepath, map_filepath, perm_filepath)
