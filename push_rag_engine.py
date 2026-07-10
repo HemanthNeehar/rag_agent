@@ -123,6 +123,104 @@ def trigger_confluence_gcs_to_rag_engine():
         print("  [Warning] Some files failed. Run the following to inspect:")
         print(f"  gcloud ai rag files list --corpus={corpus_name} --location={location}")
 
+    # Programmatically apply metadata tags (restricted, source_system, space_name, site_name)
+    apply_metadata_to_corpus_files()
+
+
+def apply_metadata_to_corpus_files():
+    """
+    Loads permissions maps from GCS and programmatically tags imported RAG files
+    with custom metadata fields (restricted, source_system, space_name, site_name)
+    using vertexai.preview.rag.batch_create_metadata.
+    """
+    project_id = os.getenv("GOOGLE_CLOUD_PROJECT")
+    location = os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
+    corpus_id = os.getenv("RAG_CORPUS_ID", "6301661778598166528")
+    gcs_bucket = os.getenv("RAG_GCS_BUCKET_NAME", "multi-agent-sdlc")
+    corpus_name = f"projects/{project_id}/locations/{location}/ragCorpora/{corpus_id}"
+
+    import json
+    import subprocess
+    
+    # 1. Download permissions maps from GCS
+    confluence_map = {}
+    sharepoint_map = {}
+    
+    print("\nDownloading Confluence and SharePoint permissions maps from GCS...")
+    try:
+        res1 = subprocess.run(
+            ["gcloud", "storage", "cat", f"gs://{gcs_bucket}/gcs_confluence_permissions_map.json"],
+            capture_output=True, text=True, check=True
+        )
+        confluence_map = json.loads(res1.stdout)
+        print(f"  Loaded {len(confluence_map)} Confluence permissions entries.")
+    except Exception as e:
+        print(f"  [Warning] Confluence permissions map not found or empty: {e}")
+
+    try:
+        res2 = subprocess.run(
+            ["gcloud", "storage", "cat", f"gs://{gcs_bucket}/gcs_sharepoint_permissions_map.json"],
+            capture_output=True, text=True, check=True
+        )
+        sharepoint_map = json.loads(res2.stdout)
+        print(f"  Loaded {len(sharepoint_map)} SharePoint permissions entries.")
+    except Exception as e:
+        print(f"  [Warning] SharePoint permissions map not found or empty: {e}")
+
+    # 2. Iterate through files in RAG Corpus and apply metadata
+    print("\nScanning RAG Corpus files to apply custom metadata...")
+    try:
+        corpus_files = list(rag.list_files(corpus_name=corpus_name))
+        print(f"  Found {len(corpus_files)} file(s) in RAG corpus.")
+        
+        for rag_file in corpus_files:
+            display_name = rag_file.display_name
+            metadata_entry = None
+            source_system = None
+            
+            if display_name in confluence_map:
+                metadata_entry = confluence_map[display_name]
+                source_system = "confluence"
+            elif display_name in sharepoint_map:
+                metadata_entry = sharepoint_map[display_name]
+                source_system = "sharepoint"
+                
+            if not metadata_entry:
+                print(f"  -> No permission map entry for {display_name}. Skipping metadata tagging.")
+                continue
+                
+            restricted = metadata_entry.get("restricted", False)
+            space_name = metadata_entry.get("space_name", "")
+            site_name = metadata_entry.get("site_name", "")
+            
+            print(f"  -> Tagging {display_name} ({source_system}): restricted={restricted}, space_name={space_name}, site_name={site_name}")
+            
+            try:
+                # Build MetadataValues
+                values = {
+                    "restricted": rag.MetadataValue(bool_value=restricted),
+                    "source_system": rag.MetadataValue(string_value=source_system)
+                }
+                if space_name:
+                    values["space_name"] = rag.MetadataValue(string_value=space_name)
+                if site_name:
+                    values["site_name"] = rag.MetadataValue(string_value=site_name)
+                    
+                user_metadata = rag.UserSpecifiedMetadata(values=values)
+                rag_metadata = rag.RagMetadata(user_specified_metadata=user_metadata)
+                
+                rag.batch_create_metadata(
+                    corpus_name=corpus_name,
+                    file_name=rag_file.name,
+                    requests=[rag_metadata]
+                )
+                print(f"     Successfully tagged.")
+            except Exception as tag_err:
+                print(f"     [Error] Failed tagging file {display_name}: {tag_err}")
+                
+    except Exception as list_err:
+        print(f"  [Error] Failed listing corpus files: {list_err}")
+
 
 if __name__ == "__main__":
     trigger_confluence_gcs_to_rag_engine()

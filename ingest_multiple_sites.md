@@ -255,7 +255,13 @@ Every variant downloads, incrementally updates, and synchronizes the centralized
 These security mechanisms are **fully implemented, tested, and active within the deployed agent codebase**:
 
 *   **Thread-Safe Identity Propagation**: Inside `agent_rag.py` and `chat_server.py`, user emails and AD groups are routed dynamically using Python `contextvars`. This allows user identities to traverse multi-threaded execution pools without modifying ADK tool signatures.
-*   **Dual-Layer Redaction**: Programmatic chunk redaction is implemented in both the primary RAG tool method (`_query_rag_corpus` in `agent_rag.py`) and the server direct fallback method (`_query_via_rag_corpus` in `chat_server.py`).
+*   **Dual-Layer Security (Dynamic pre-retrieval CEL filtering + Post-retrieval Redaction)**:
+    - **Pre-Retrieval Dynamic CEL Filter**: The agent (`agent_rag.py`) translates the user's role-based permissions into a robust pre-retrieval CEL filter (e.g. `restricted == false || department == 'hr'`). This restricts vector search results *before* similarity matching, preventing retrieval starvation (Top-K deficit) where all returned vector matches are redacted post-search.
+    - **Space/Site-Specific Partitioning**: Users can narrow down queries to a specific SharePoint site or Confluence space using session filters (dropdowns setting `current_query_space`/`current_query_site` contextvars) or via natural language query tags (e.g. `space:SEC-COMP` or `site:exit-lts`).
+    - **Post-Retrieval Chunk Redaction**: Retained as a redundant safety net. It intercepts the retrieved chunks and does a second pass validation of the user's email or group memberships against the GCS maps.
+*   **Split Permissions Maps (Race-Condition Free)**: Confluence and SharePoint crawlers write page permissions to dedicated GCS files (`gcs_confluence_permissions_map.json` and `gcs_sharepoint_permissions_map.json`), eliminating lost-update race conditions during concurrent crawler jobs. The RAG agent dynamically merges these files in-memory at runtime.
+*   **Post-Sync Metadata Enrichment**: Since Vertex AI's `rag.import_files` is a bulk ingestion tool that does not support fine-grained per-file user-specified metadata, the sync script (`push_rag_engine.py`) runs a programmatic post-sync pass. It reads all corpus files using `rag.list_files()`, matches them to the GCS permission maps, and applies custom metadata tags (such as `space_name`, `site_name`, `restricted`, and `source_system`) using `rag.batch_create_metadata()`.
 *   **Interactive Simulation dropdown**: The frontend chat interface has been upgraded with a sleek, HSL-themed security role dropdown. You can switch between roles (Guest, Developer, HR Manager, CEO) to instantly simulate query-time ACL evaluation and watch chunks redact in real time!
+
 
 

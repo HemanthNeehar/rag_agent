@@ -1085,6 +1085,8 @@ def process_single_page(
     
     # Fetch page restrictions
     permissions = fetch_page_restrictions(base_api, page_id, auth, headers)
+    permissions = permissions.copy()
+    permissions["space_name"] = space_key
     
     bucket_name = os.getenv("RAG_GCS_BUCKET_NAME", "confluence-sharepoint-rag-bucket")
     main_uploaded_previously = False
@@ -1236,6 +1238,7 @@ def process_single_page(
                 "restricted": permissions.get("restricted", False),
                 "allowed_users": permissions.get("allowed_users", []),
                 "allowed_groups": permissions.get("allowed_groups", []),
+                "space_name": permissions.get("space_name", ""),
             }
             docs.append(main_doc)
 
@@ -1342,6 +1345,7 @@ def process_single_page(
                                             "restricted": permissions.get("restricted", False),
                                             "allowed_users": permissions.get("allowed_users", []),
                                             "allowed_groups": permissions.get("allowed_groups", []),
+                                            "space_name": permissions.get("space_name", ""),
                                         }
                                         
                                         # Upload immediately!

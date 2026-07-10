@@ -12,9 +12,11 @@ from google.adk.agents import Agent
 agent_dir = Path(__file__).parent
 load_dotenv(agent_dir.parent / ".env")
 
-# Context variables to track querying session identity thread-safely
+# Context variables to track querying session identity and filters thread-safely
 current_user_email = contextvars.ContextVar("current_user_email", default="guest@example.com")
 current_user_groups = contextvars.ContextVar("current_user_groups", default=[])
+current_query_space = contextvars.ContextVar("current_query_space", default=None)
+current_query_site = contextvars.ContextVar("current_query_site", default=None)
 
 ## Load instruction from markdown file
 instruction_file = agent_dir / "INSTRUCTION.md"
@@ -148,15 +150,86 @@ def _extract_source_url(text: str) -> str | None:
 
 def _query_rag_corpus(query_str: str) -> str:
     """Queries the Vertex AI RAG corpus and returns formatted results with source links and images."""
+    # Retrieve current user context threadsafely
+    email = current_user_email.get()
+    groups = current_user_groups.get()
+    target_space = current_query_space.get()
+    target_site = current_query_site.get()
+
+    # Programmatic inline extraction of space/site keys if written by user (e.g. space:SEC-COMP or site:exit-lts)
+    space_match = re.search(r'\bspace:([a-zA-Z0-9_\-]+)\b', query_str)
+    site_match = re.search(r'\bsite:([a-zA-Z0-9_\-]+)\b', query_str)
+    
+    if space_match:
+        target_space = space_match.group(1).strip()
+        query_str = re.sub(r'\bspace:[a-zA-Z0-9_\-]+\b', '', query_str).strip()
+    if site_match:
+        target_site = site_match.group(1).strip()
+        query_str = re.sub(r'\bsite:[a-zA-Z0-9_\-]+\b', '', query_str).strip()
+
+    enable_cel = os.getenv("ENABLE_CEL_METADATA_FILTERING", "FALSE").strip().upper() == "TRUE"
+    retrieval_config = None
+
+    if enable_cel:
+        cel_filter = None
+        if groups:
+            # Check if user has any privileged groups
+            privileged_groups = {"HR", "PAYROLL", "LEGAL", "EXEC_BOARD"}
+            user_upper_groups = {g.upper() for g in groups}
+            user_priv_groups = user_upper_groups.intersection(privileged_groups)
+
+            if not user_priv_groups:
+                # Standard user: strictly filter out restricted documents at database layer
+                cel_filter = "restricted == false"
+            else:
+                # Privileged user: allow public documents OR documents matching their specific privileged department/group
+                # e.g., if user is in HR, allow: restricted == false || department == "hr"
+                clauses = ["restricted == false"]
+                for priv in user_priv_groups:
+                    clauses.append(f'department == "{priv.lower()}"')
+                cel_filter = " || ".join(clauses)
+        else:
+            # Default fallback (anonymous/unauthenticated): public documents only
+            cel_filter = "restricted == false"
+
+        # Apply specific space/site focus if requested by frontend or parsed from query
+        if target_space:
+            cel_filter = f"({cel_filter}) && space_name == '{target_space}'"
+        if target_site:
+            cel_filter = f"({cel_filter}) && site_name == '{target_site}'"
+
+        if cel_filter:
+            print(f"[agent_rag] Constructing dynamic CEL metadata filter for user {email}: {cel_filter}", flush=True)
+            try:
+                from vertexai.preview.rag import RagRetrievalConfig, Filter
+                retrieval_config = RagRetrievalConfig(
+                    filter=Filter(
+                        vector_distance_threshold=0.5,
+                        metadata_filter=cel_filter
+                    )
+                )
+            except Exception as e:
+                print(f"[agent_rag] Failed to construct RagRetrievalConfig: {e}", flush=True)
+
     try:
-        response = rag.retrieval_query(
-            rag_resources=[
-                rag.RagResource(rag_corpus=corpus_name)
-            ],
-            text=query_str,
-            similarity_top_k=5,
-            vector_distance_threshold=0.5,
-        )
+        if retrieval_config:
+            response = rag.retrieval_query(
+                rag_resources=[
+                    rag.RagResource(rag_corpus=corpus_name)
+                ],
+                text=query_str,
+                similarity_top_k=5,
+                rag_retrieval_config=retrieval_config,
+            )
+        else:
+            response = rag.retrieval_query(
+                rag_resources=[
+                    rag.RagResource(rag_corpus=corpus_name)
+                ],
+                text=query_str,
+                similarity_top_k=5,
+                vector_distance_threshold=0.5,
+            )
     except Exception as e:
         print(f"[rag_agent_gcs] RAG corpus query failed: {e}", flush=True)
         return f"Search failed: {e}"

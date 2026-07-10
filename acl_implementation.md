@@ -268,3 +268,83 @@ To completely eliminate write concurrency and guarantee atomic, race-condition-f
           gcs_permissions_map.update(loaded_data)
       ```
 3.  **Impact**: This guarantees 100% data safety, enables safe infinite horizontal scaling of crawler workloads, and provides a simple, lock-free, zero-coordination synchronization mechanism.
+
+---
+
+## 7. Space & Site-Level Metadata Ingestion & Dynamic CEL Filtering
+
+To support enterprise-grade retrieval slicing (e.g., restricted queries, department-level segmenting, or targeting a single SharePoint site or Confluence space), our architecture utilizes a **pre-retrieval metadata mapping system** backed by Common Expression Language (CEL) filtering.
+
+### A. Crawl-Time Space/Site Enrichment
+Every file or attachment crawler preserves spatial context:
+- **Confluence Space key** (e.g., `space_name = "SEC-COMP"`) is added directly to the document definitions and stored in `gcs_confluence_permissions_map.json` under each file's key.
+- **SharePoint Site name** (e.g., `site_name = "exit-lts"`) is similarly appended during crawler processing and written to `gcs_sharepoint_permissions_map.json`.
+
+Example of enriched permissions entries:
+```json
+{
+  "confluence_page_1001.md": {
+    "restricted": false,
+    "allowed_users": [],
+    "allowed_groups": [],
+    "space_name": "SEC-COMP"
+  },
+  "sharepoint_file_2002.md": {
+    "restricted": true,
+    "allowed_users": ["bob@company.com"],
+    "allowed_groups": ["HR_TEAM"],
+    "site_name": "exit-lts"
+  }
+}
+```
+
+### B. Post-Import Batch Metadata Tagging
+Because bulk API import (`rag.import_files`) does not support direct metadata passing in its method signatures, our RAG sync engine (`push_rag_engine.py`) performs a secure **Post-Sync Tagging Pass**:
+1. After importing files into the Vertex AI RAG corpus, the sync job queries all corpus files using `rag.list_files()`.
+2. It matches files by their `display_name` to their corresponding entries in `gcs_confluence_permissions_map.json` and `gcs_sharepoint_permissions_map.json`.
+3. It performs a batch metadata create/update using `rag.batch_create_metadata()`:
+   ```python
+   # Build MetadataValues
+   values = {
+       "restricted": rag.MetadataValue(bool_value=restricted),
+       "source_system": rag.MetadataValue(string_value=source_system)
+   }
+   if space_name:
+       values["space_name"] = rag.MetadataValue(string_value=space_name)
+   if site_name:
+       values["site_name"] = rag.MetadataValue(string_value=site_name)
+       
+   user_metadata = rag.UserSpecifiedMetadata(values=values)
+   rag_metadata = rag.RagMetadata(user_specified_metadata=user_metadata)
+   
+   rag.batch_create_metadata(
+       corpus_name=corpus_name,
+       file_name=rag_file.name,
+       requests=[rag_metadata]
+   )
+   ```
+
+### C. Dynamic Query-Time Filtering via CEL
+At retrieval time, the agent (`agent_rag.py`) generates a dynamic Common Expression Language (CEL) filter expression. This restricts search matching *before* vector distance checks, fully solving the "Top-K Deficit / Retrieval Starvation" problem where post-retrieval filtering alone could redact all fetched results.
+
+#### Features Supported:
+1. **Thread-Safe ContextVariables**: Frontends passing specific site or space filters (e.g., via dropdown selections) can set `current_query_space` or `current_query_site` in the threadcontext. The agent will read these variables and append them to the pre-retrieval filter.
+2. **Natural Language Syntax Parsing**: The agent automatically detects and parses inline filter tags in the user prompt (e.g., `space:SEC-COMP` or `site:exit-lts`), cleans the prompt so it does not affect semantic search matching, and injects the corresponding filter rule into the CEL statement!
+
+#### Logic Evaluation Matrix:
+- **Query**: `"Show exit review documents site:exit-lts"`
+- **User Groups**: `["HR_TEAM"]`
+- **Resulting CEL Filter**:
+  ```cel
+  ((restricted == false) || department == "hr_team") && site_name == "exit-lts"
+  ```
+- **Query**: `"Show roadmap documents space:SEC-COMP"`
+- **User Groups**: `["DEVELOPERS"]` (Not privileged)
+- **Resulting CEL Filter**:
+  ```cel
+  (restricted == false) && space_name == "SEC-COMP"
+  ```
+
+This dual-layered architecture provides a incredibly sophisticated, secure, and user-friendly experience, making the agent completely ready for modern enterprise deployments.
+
+

@@ -103,90 +103,85 @@ When files are imported into the RAG Engine, the system utilizes the following e
 
 ---
 
-## 4. Text-Embedded Metadata Filtering
+## 4. Dual-Layered Metadata Enrichment
 
-Because the standard `vertexai.rag` SDK's GCS bulk-import API does not natively bind secondary sidecar files (like `metadata.jsonl`) without complex post-processing steps, we utilize a robust **Text-Embedded Metadata** strategy.
+To deliver maximum search accuracy and operational flexibility, our pipeline implements a **Dual-Layered Metadata Strategy**:
 
-### The Header Structure
-Every ingested document is enriched with a unified header and footer block during Step 3:
+### A. Text-Embedded Metadata (Vectorized Grounding)
+During crawling, every generated Markdown file is enriched with a unified header and footer text block:
 ```text
 source_url: https://lumen.atlassian.net/wiki/spaces/BMEP/pages/673300152381
 title: Project Connect Deployment Plan
 source_system: Confluence
+space_name: BMEP
 ```
+- **Natively Vectorized:** Since this header is part of the text body, the RAG Engine indexes it into the vector space.
+- **Naturally Queryable:** Users mentioning "BMEP" naturally surface these files due to vector overlap.
 
-### Why This is an Effective Filtering Strategy
-1.  **Natively Vectorized:** Since this header text is physically part of the document body, the RAG Engine embeds it into the same vector space.
-2.  **Naturally Queryable:** If an agent or user queries: *"Show me the Project Connect Deployment Plan in BMEP"* or *"Find SharePoint documents on BMVS-848"*, the vector engine matches keywords like `BMEP` (found in the `source_url` path) and `SharePoint` (found in `source_system`), automatically prioritizing the exact target chunk.
-3.  **No Extra Database Cost:** It requires zero database schema migrations, extra `RagDataSchema` configurations, or programmatic API updates, delivering out-of-the-box relevance.
+### B. Database-Level Schema Metadata (Post-Sync Enrichment)
+Because bulk GCS import (`rag.import_files`) does not support user-specified metadata directly in its API signature, `push_rag_engine.py` performs a secure **Post-Sync Tagging Pass**:
+1. It retrieves all corpus files via `rag.list_files()`.
+2. It matches files to their respective GCS permission maps (`gcs_confluence_permissions_map.json` and `gcs_sharepoint_permissions_map.json`).
+3. It calls `rag.batch_create_metadata()` to apply fields to each RAG file:
+   - `restricted` (bool)
+   - `source_system` (string)
+   - `space_name` / `site_name` (string)
 
 ---
 
-## 5. Enterprise Access Control List (ACL) & Query-Time Redaction
+## 5. Enterprise Access Control List (ACL) & Dynamic Filtering
 
-To secure restricted enterprise files, our RAG pipeline implements a highly granular, two-phase Access Control List (ACL) security system. This guarantees that user query permissions are dynamic, completely aligned with the source repository boundaries, and backwards compatible.
+Our security pipeline implements **Dual-Layer Enforcement** to guarantee absolute data security with zero retrieval starvation:
 
 ```mermaid
 sequenceDiagram
     autonumber
     actor User as Querying User (e.g. Guest or HR Manager)
-    participant UI as Chat Web UI
     participant Backend as FastAPI Backend (chat_server)
     participant ADK as Deployed ADK Agent / Executor
     participant RAG as Vertex AI RAG Corpus (Spanner)
     participant Storage as GCS Permissions Store
 
-    User->>UI: Select Role Identity & Submit Query
-    UI->>Backend: GET /api/stream?query=...&user_email=...&user_groups=...
-    Note over Backend: Propagate Identity via thread-safe contextvars
+    User->>Backend: Submit Query (email, groups, site/space filters)
+    Note over Backend: Propagate Identity & Filters via ContextVars
     Backend->>ADK: Invoke Query Agent Runner
-    ADK->>RAG: Retrieve matching vector chunks (similarity search)
-    RAG-->>ADK: Return Top-K chunks (unfiltered)
-    ADK->>Storage: Read gcs_permissions_map.json (cached on startup)
+    Note over ADK: Generate Pre-Retrieval CEL Filter
+    ADK->>RAG: Retrieval Query + CEL Filter (e.g. restricted == false && space_name == 'BMEP')
+    Note over RAG: Filter matching chunks at vector database layer
+    RAG-->>ADK: Return filtered chunks (No Retrieval Starvation!)
+    ADK->>Storage: Read gcs_permissions_map (Merged from split maps)
     
     loop For each chunk's source filename
-        Note over ADK: Is the document restricted?
-        alt Yes, file is restricted (restricted == True)
-            Note over ADK: Does user email or user groups match allowed list?
-            alt Access Granted (Email/Group Match)
-                Note over ADK: Keep chunk in LLM context
-            else Access Denied (No Match)
-                Note over ADK: Silently Redact chunk (discard text)
-            end
-        else No, file is public
+        Note over ADK: Double-Check ACL Permissions
+        alt User Has Access (Email/Group Match)
             Note over ADK: Keep chunk in LLM context
+        else Access Denied (No Match)
+            Note over ADK: Silently Redact chunk (discard text)
         end
     end
     
     ADK-->>Backend: Return consolidated context chunks (safely filtered)
-    Backend-->>UI: Stream response tokens to User
+    Backend-->>User: Stream response tokens
 ```
 
 ### Phase A: Ingestion-Time (Crawl-Time) ACL Extraction
-During crawling, the ingestion jobs extract access controls from source permissions APIs and store them as metadata:
-1.  **Confluence Ingest (`ingest_gcs.py`)**: For each page, queries Atlassian page restrictions APIs (`fetch_page_restrictions`). It compiles all specific read restrictions, including individual user accounts and group memberships.
-2.  **SharePoint Ingest (`ingest_sharepoint_gcs.py`)**: For each item and library file, queries MS Graph API `/drives/{drive_id}/items/{item_id}/permissions`.
-3.  **Permissions Schema**:
-    If read restrictions are found, the crawler marks the file as `"restricted": true`, registers the allowed emails under `allowed_users`, and registers allowed AD groups under `allowed_groups`.
-4.  **Metadata Staging**:
-    *   Writes these permission properties directly into the generated markdown (.md) frontmatter header block.
-    *   Dynamically registers them inside a centralized map file: `gcs_permissions_map.json`, which is synchronized incrementally back to the GCS bucket (`RAG_GCS_BUCKET_NAME`) at the end of every crawl run.
+To prevent concurrency lockouts during parallel crawler runs, permissions are written to separate map files:
+1. **Confluence Ingest (`ingest_gcs.py`)**: Writes permissions and `space_name` to `gcs_confluence_permissions_map.json`.
+2. **SharePoint Ingest (`ingest_sharepoint_gcs.py`)**: Writes permissions and `site_name` to `gcs_sharepoint_permissions_map.json`.
+3. **Dynamic Merge**: At startup, `agent_rag.py` downloads both files and merges them in-memory into a unified permissions lookup dictionary.
 
-### Phase B: Query-Time Post-Retrieval Chunk Redaction
-Because standard Vertex AI RAG engines store all text chunks collectively in a single-corpus database (`RagManagedDB`) on Spanner and cannot dynamically enforce multi-tenant ADK user query permissions out-of-the-box, we implement **Post-Retrieval Chunk Redaction** at query time:
-1.  **Session Identity Resolution**: When a user queries the assistant, their email and group memberships are extracted (e.g. from FastAPI endpoints or A2A RequestContext metadata) and mapped into global, async-safe Python **`contextvars`** (`current_user_email` and `current_user_groups`).
-2.  **Normalized ACL Verification**:
-    The assistant retrieves the top-5 matching document chunks. For each chunk, it reads the source GCS filename and searches `gcs_permissions_map.json` using case-insensitive and space-insensitive matching.
-3.  **Strict Redaction**:
-    *   If the source document is marked as `"restricted": true`:
-        *   If the user's email matches `allowed_users` **OR** the user's groups overlap with `allowed_groups` (case-insensitive), **access is granted** (the chunk is fully retained and visible to the user).
-        *   Otherwise, **access is denied** and the chunk is silently discarded (redacted) before the response blocks are formatted or sent to the Gemini LLM.
-    *   If the file has no restrictions or is not listed in `gcs_permissions_map.json`, it defaults to **public (access granted)**.
+### Phase B: Query-Time Dual-Layer Enforcement
 
-> [!IMPORTANT]
-> **No Accidental Access Blocking**: "Restricted" in this context does *not* mean the document is blocked in general. It simply means that it is restricted *to a specific list of authorized users and groups on the original system (SharePoint or Confluence)*.
-> - If a user has read access on the original system, their email/group matches the allowed lists, and **they will be able to query and view it normally** in the RAG assistant.
-> - The redaction layer only filters chunks for users who **do not** have access to the file on the source systems.
-> - This guarantees that the RAG assistant perfectly mirrors original enterprise boundaries without blocking any legitimate access.
+#### Layer 1: Pre-Retrieval Database-Level CEL Filtering
+The agent (`agent_rag.py`) automatically translates user permissions and session filters into a pre-retrieval CEL expression:
+- **Standard User**: `restricted == false`
+- **Privileged User (e.g., HR Group)**: `restricted == false || department == 'hr'`
+- **Targeted Slicing**: If the user specifies a site/space (via front-end selectors setting `current_query_space`/`current_query_site` ContextVars, or inline syntax like `space:SEC-COMP`), the expression is refined:
+  `((restricted == false) || department == 'hr') && space_name == 'SEC-COMP'`
 
-This dual-layered architecture delivers complete enterprise safety: **users can never read restricted content they do not own, but are never blocked from viewing public or restricted documents they have legitimate access to.**
+This limits the search space *before* similarity matching, preventing the "Top-K Deficit / Retrieval Starvation" problem where all returned chunks are redacted, leaving the LLM with no visible context.
+
+#### Layer 2: Post-Retrieval Chunk Redaction (Safety Net)
+The retrieved chunks are evaluated a second time in-memory. If a file's mapped `allowed_users` or `allowed_groups` do not match the user's thread-safe context identity, the chunk is instantly discarded, providing a redundant fail-safe.
+
+This guarantees complete enterprise data safety: **unauthorized users can never access restricted information, and authorized users are never starved of legitimate context.**

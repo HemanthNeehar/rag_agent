@@ -1059,6 +1059,11 @@ def process_file_item(
     permissions = {"restricted": False, "allowed_users": [], "allowed_groups": []}
     if headers and real_drive_id and real_item_id:
         permissions = fetch_sharepoint_item_permissions("https://graph.microsoft.com/v1.0", real_drive_id, real_item_id, headers)
+    
+    # Enrich permissions dictionary with site metadata
+    site_name = item_details.get("site_name", "")
+    permissions = permissions.copy()
+    permissions["site_name"] = site_name
         
     catalog_key = f"sharepoint_{item_id}"
     
@@ -1127,6 +1132,7 @@ def process_file_item(
                     "restricted": permissions.get("restricted", False),
                     "allowed_users": permissions.get("allowed_users", []),
                     "allowed_groups": permissions.get("allowed_groups", []),
+                    "site_name": permissions.get("site_name", ""),
                 }]
                 
                 # Immediately upload the markdown for this standalone image
@@ -1240,6 +1246,7 @@ def process_file_item(
                         "restricted": permissions.get("restricted", False),
                         "allowed_users": permissions.get("allowed_users", []),
                         "allowed_groups": permissions.get("allowed_groups", []),
+                        "site_name": permissions.get("site_name", ""),
                     })
                     
                     # Immediately upload markdown to GCS
@@ -1707,7 +1714,8 @@ def fetch_graph_api_data(
                             gcs_permissions_map[filename] = {
                                 "restricted": doc["restricted"],
                                 "allowed_users": doc["allowed_users"],
-                                "allowed_groups": doc["allowed_groups"]
+                                "allowed_groups": doc["allowed_groups"],
+                                "site_name": doc.get("site_name", "")
                             }
                     
                     # Save incremental/intermittent state to GCS to safeguard against timeouts
@@ -1849,7 +1857,8 @@ def main():
                 gcs_permissions_map[filename] = {
                     "restricted": doc["restricted"],
                     "allowed_users": doc["allowed_users"],
-                    "allowed_groups": doc["allowed_groups"]
+                    "allowed_groups": doc["allowed_groups"],
+                    "site_name": doc.get("site_name", "")
                 }
             
     # Save the updated files locally
