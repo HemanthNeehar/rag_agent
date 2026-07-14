@@ -1304,7 +1304,6 @@ def process_file_item(
         return docs, catalog_update
 
     finally:
-        import shutil
         try:
             if file_temp_dir.exists():
                 shutil.rmtree(file_temp_dir)

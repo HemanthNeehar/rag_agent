@@ -1381,7 +1381,6 @@ def process_single_page(
             print(f"     [Warning] Failed processing attachments for page '{title}': {e}")
 
     finally:
-        import shutil
         try:
             if page_temp_images_dir.exists():
                 shutil.rmtree(page_temp_images_dir)
