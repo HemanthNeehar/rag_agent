@@ -65,9 +65,18 @@ def get_all_corpus_files(corpus_name):
                 print("     Detected ListRagFilesPager. Extracting files...")
                 page_idx = 1
                 for page in response.pages:
-                    page_files = list(page)
-                    print(f"        Loaded page {page_idx} ({len(page_files)} files)...")
-                    corpus_files.extend(page_files)
+                    # Safely extract files from the page (which is a ListRagFilesResponse)
+                    if hasattr(page, "rag_files"):
+                        page_files = page.rag_files or []
+                    else:
+                        try:
+                            page_files = list(page)
+                        except TypeError:
+                            page_files = []
+                    
+                    page_files_list = list(page_files)
+                    print(f"        Loaded page {page_idx} ({len(page_files_list)} files)...")
+                    corpus_files.extend(page_files_list)
                     page_idx += 1
                     time.sleep(2.0)
                 break # Pager handles all pages automatically

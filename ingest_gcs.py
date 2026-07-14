@@ -1484,6 +1484,7 @@ def fetch_confluence_pages(
 
     # Gather ALL pages first (super-fast metadata scan)
     all_pages_to_process = []
+    has_fetch_errors = False
     for space_key in space_keys:
         start = 0
         limit = 50
@@ -1506,6 +1507,7 @@ def fetch_confluence_pages(
                 data = pages_resp.json()
             except Exception as e:
                 print(f"  [Error] Could not fetch pages for space {space_key}: {e}")
+                has_fetch_errors = True
                 break
 
             results = data.get("results", [])
@@ -1519,49 +1521,73 @@ def fetch_confluence_pages(
 
     print(f"  -> Discovered {len(all_pages_to_process)} total page(s) in Confluence.")
 
-    # 1. Sync Confluence page deletions back to GCS and update catalog
+    # 1. Sync Confluence page deletions back to GCS and update catalog (with Defensive Guardrails)
     fetched_page_ids = {f"confluence_{page['id']}" for page in all_pages_to_process}
     bucket_name = os.getenv("RAG_GCS_BUCKET_NAME")
+    
     if bucket_name and bucket_name != "YOUR_BUCKET_NAME":
-        deleted_catalog_keys = []
-        for catalog_key, entry in list(catalog.items()):
-            if catalog_key.startswith("confluence_") and "_attachment_" not in catalog_key:
-                if catalog_key not in fetched_page_ids:
-                    # Only purge if it belongs to the synced spaces
-                    space_key_in_catalog = entry.get("space_key")
-                    if not space_key_in_catalog or space_key_in_catalog in space_keys:
-                        deleted_catalog_keys.append(catalog_key)
+        # Calculate existing page count in catalog
+        catalog_confluence_pages_count = sum(1 for k in catalog if k.startswith("confluence_") and "_attachment_" not in k)
         
-        if deleted_catalog_keys:
-            print(f"\n  [Delete Sync] Detected {len(deleted_catalog_keys)} page(s) deleted from Confluence. Syncing purges...")
-            for del_key in deleted_catalog_keys:
-                entry = catalog[del_key]
-                del_filename = entry.get("filename")
-                print(f"     -> Purging deleted page: {entry.get('title')} (GCS: {del_filename})")
-                if del_filename:
-                    try:
-                        delete_file_from_gcs(f"gs://{bucket_name}/{del_filename}")
-                    except Exception as ex:
-                        print(f"     [Warning] Failed deleting gs://{bucket_name}/{del_filename}: {ex}")
-                catalog.pop(del_key, None)
-                if del_filename:
-                    gcs_confluence_map.pop(del_filename, None)
+        # Check Guardrail 1: API Connection/Fetch Errors
+        if has_fetch_errors:
+            print("\n" + "="*80)
+            print("[CRITICAL SAFETY WARNING] One or more API errors occurred while fetching Confluence pages.")
+            print("To prevent accidental data loss due to incomplete page discovery, DELETE SYNC HAS BEEN AUTO-PAUSED.")
+            print("No files were deleted from GCS, and no catalog entries were purged.")
+            print("="*80 + "\n")
+            
+        # Check Guardrail 2: Accidental Massive Deletion (Service Account Expiration)
+        elif catalog_confluence_pages_count > 10 and len(all_pages_to_process) == 0:
+            print("\n" + "="*80)
+            print(f"[CRITICAL SAFETY WARNING] Confluence API returned 0 pages, but your catalog contains "
+                  f"{catalog_confluence_pages_count} existing Confluence page(s).")
+            print("This is highly indicative of service account expiration or permission loss!")
+            print("To prevent accidental data loss and protect your GCS storage, DELETE SYNC HAS BEEN AUTO-PAUSED.")
+            print("No files were deleted from GCS, and no catalog entries were purged.")
+            print("Please check and verify your Confluence Service Account credentials.")
+            print("="*80 + "\n")
+            
+        else:
+            deleted_catalog_keys = []
+            for catalog_key, entry in list(catalog.items()):
+                if catalog_key.startswith("confluence_") and "_attachment_" not in catalog_key:
+                    if catalog_key not in fetched_page_ids:
+                        # Only purge if it belongs to the synced spaces
+                        space_key_in_catalog = entry.get("space_key")
+                        if not space_key_in_catalog or space_key_in_catalog in space_keys:
+                            deleted_catalog_keys.append(catalog_key)
+            
+            if deleted_catalog_keys:
+                print(f"\n  [Delete Sync] Detected {len(deleted_catalog_keys)} page(s) deleted from Confluence. Syncing purges...")
+                for del_key in deleted_catalog_keys:
+                    entry = catalog[del_key]
+                    del_filename = entry.get("filename")
+                    print(f"     -> Purging deleted page: {entry.get('title')} (GCS: {del_filename})")
+                    if del_filename:
+                        try:
+                            delete_file_from_gcs(f"gs://{bucket_name}/{del_filename}")
+                        except Exception as ex:
+                            print(f"     [Warning] Failed deleting gs://{bucket_name}/{del_filename}: {ex}")
+                    catalog.pop(del_key, None)
+                    if del_filename:
+                        gcs_confluence_map.pop(del_filename, None)
 
-                # Also find and purge all associated attachments!
-                del_page_id = del_key[11:]  # "confluence_12345" -> "12345"
-                for att_key, att_entry in list(catalog.items()):
-                    if att_key.startswith("confluence_attachment_"):
-                        if str(att_entry.get("page_id")) == str(del_page_id):
-                            # Purge attachment files!
-                            att_filenames = att_entry.get("filenames", [])
-                            print(f"        -> Purging deleted attachment: {att_entry.get('title')} (GCS: {att_filenames})")
-                            for att_fn in att_filenames:
-                                try:
-                                    delete_file_from_gcs(f"gs://{bucket_name}/{att_fn}")
-                                except Exception as ex:
-                                    print(f"     [Warning] Failed deleting gs://{bucket_name}/{att_fn}: {ex}")
-                                gcs_confluence_map.pop(att_fn, None)
-                            catalog.pop(att_key, None)
+                    # Also find and purge all associated attachments!
+                    del_page_id = del_key[11:]  # "confluence_12345" -> "12345"
+                    for att_key, att_entry in list(catalog.items()):
+                        if att_key.startswith("confluence_attachment_"):
+                            if str(att_entry.get("page_id")) == str(del_page_id):
+                                # Purge attachment files!
+                                att_filenames = att_entry.get("filenames", [])
+                                print(f"        -> Purging deleted attachment: {att_entry.get('title')} (GCS: {att_filenames})")
+                                for att_fn in att_filenames:
+                                    try:
+                                        delete_file_from_gcs(f"gs://{bucket_name}/{att_fn}")
+                                    except Exception as ex:
+                                        print(f"     [Warning] Failed deleting gs://{bucket_name}/{att_fn}: {ex}")
+                                    gcs_confluence_map.pop(att_fn, None)
+                                catalog.pop(att_key, None)
 
     # 2. Run multi-threaded ingestion for modified or new pages
     concurrency = int(os.getenv("CONFLUENCE_INGEST_CONCURRENCY", "3"))
