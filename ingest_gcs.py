@@ -24,6 +24,7 @@ gemini_semaphore = threading.Semaphore(3)
 # Thread-safe lock for catalog & map file writes and GCS uploads
 state_lock = threading.Lock()
 last_gcs_upload_time = 0.0
+confluence_failures = []
 
 # Global permissions map to match GCS files with dynamic enterprise permissions
 gcs_permissions_map = {}
@@ -1379,6 +1380,13 @@ def process_single_page(
                                         print(f"     [Warning] Failed deleting temporary attachment file: {del_err}")
         except Exception as e:
             print(f"     [Warning] Failed processing attachments for page '{title}': {e}")
+            with state_lock:
+                confluence_failures.append({
+                    "file_name": f"Attachments of page: {title}",
+                    "error_code": type(e).__name__,
+                    "failure_reason": str(e),
+                    "space_name": space_key
+                })
 
     finally:
         try:
@@ -1640,6 +1648,13 @@ def fetch_confluence_pages(
                     skipped_count += 1
             except Exception as e:
                 print(f"  [Error] Thread processing failed for page '{page.get('title')}': {e}")
+                with state_lock:
+                    confluence_failures.append({
+                        "file_name": page.get("title", "Unknown"),
+                        "error_code": type(e).__name__,
+                        "failure_reason": str(e),
+                        "space_name": page.get("space_key", "UNKNOWN")
+                    })
 
     print(f"\n  [Ingestion Job Statistics]")
     print(f"     Confluence pages checked:      {len(all_pages_to_process)}")
@@ -1872,6 +1887,15 @@ def main():
 
         # Upload updated state back to GCS
         upload_state_to_gcs(bucket_name, catalog_filepath, map_filepath, perm_filepath)
+
+        # Upload failure results report to GCS
+        try:
+            local_failures_path = Path(__file__).parent / "gcs_confluence_failure_results.json"
+            local_failures_path.write_text(json.dumps(confluence_failures, indent=2, ensure_ascii=False), encoding="utf-8")
+            print(f"\n  -> Uploading {len(confluence_failures)} failure results to gs://{bucket_name}/gcs_confluence_failure_results.json...")
+            upload_file_to_gcs(local_failures_path, f"gs://{bucket_name}/gcs_confluence_failure_results.json")
+        except Exception as fail_err:
+            print(f"  [Warning] Failed writing or uploading failure results: {fail_err}")
 
         # Clean up local temp directory after upload
         if temp_dir.exists():

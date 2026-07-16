@@ -25,6 +25,8 @@ gemini_semaphore = threading.Semaphore(3)
 
 # Global permissions map to match GCS files with dynamic enterprise permissions
 gcs_permissions_map = {}
+state_lock = threading.Lock()
+sharepoint_failures = []
 
 def clean_filename(title: str) -> str:
     """Removes special characters to make a safe filename."""
@@ -1743,6 +1745,13 @@ def fetch_graph_api_data(
                     skipped_count += 1
             except Exception as e:
                 print(f"  [Error] Parallel worker failed for item {item['item_details']['name']}: {e}")
+                with state_lock:
+                    sharepoint_failures.append({
+                        "file_name": item["item_details"].get("name", "Unknown"),
+                        "error_code": type(e).__name__,
+                        "failure_reason": str(e),
+                        "site_name": item["item_details"].get("site_name", "UNKNOWN")
+                    })
                 
     print(f"     Processed (modified or new):   {processed_count}")
     print(f"     Skipped (cached):              {skipped_count}")
@@ -1871,7 +1880,16 @@ def main():
         
     # Sync states back to GCS
     upload_state_to_gcs(bucket_name, catalog_filepath, map_filepath, perm_filepath)
-    
+
+    # Upload failure results report to GCS
+    try:
+        local_failures_path = Path(__file__).parent / "gcs_sharepoint_failure_results.json"
+        local_failures_path.write_text(json.dumps(sharepoint_failures, indent=2, ensure_ascii=False), encoding="utf-8")
+        print(f"\n  -> Uploading {len(sharepoint_failures)} failure results to gs://{bucket_name}/gcs_sharepoint_failure_results.json...")
+        upload_file_to_gcs(local_failures_path, f"gs://{bucket_name}/gcs_sharepoint_failure_results.json")
+    except Exception as fail_err:
+        print(f"  [Warning] Failed writing or uploading failure results: {fail_err}")
+
     # Clean up local folders
     if temp_dir.exists():
         shutil.rmtree(temp_dir)
