@@ -13,6 +13,9 @@ from vertexai.preview import rag
 workspace_dir = Path(__file__).parent.parent
 load_dotenv(workspace_dir / ".env")
 
+push_failures = []
+push_failures_lock = threading.Lock()
+
 
 def retry_api_call(func, *args, max_retries=6, initial_backoff=2.0, **kwargs):
     """
@@ -141,6 +144,29 @@ def save_catalog_progress(tagged_catalog, catalog_gcs_uri):
         print(f"     [Warning] Failed uploading incremental progress to GCS: {save_err}")
 
 
+def save_push_failures(gcs_bucket):
+    """Writes push_failures list to GCS bucket as gcs_push_rag_failure_results.json."""
+    try:
+        temp_dir = Path("/tmp")
+        if not temp_dir.exists():
+            temp_dir.mkdir(parents=True, exist_ok=True)
+        temp_file = temp_dir / "gcs_push_rag_failure_results.json"
+        temp_file.write_text(json.dumps(push_failures, indent=2, ensure_ascii=False), encoding="utf-8")
+        
+        failures_gcs_uri = f"gs://{gcs_bucket}/gcs_push_rag_failure_results.json"
+        print(f"\n  -> Uploading {len(push_failures)} RAG push failures to {failures_gcs_uri}...")
+        subprocess.run(
+            ["gcloud", "storage", "cp", str(temp_file), failures_gcs_uri],
+            capture_output=True,
+            check=True,
+        )
+        print("  -> Upload of RAG push failures completed successfully.")
+        if temp_file.exists():
+            temp_file.unlink()
+    except Exception as e:
+        print(f"  [Warning] Failed writing or uploading push failures to GCS: {e}")
+
+
 def trigger_confluence_gcs_to_rag_engine():
     """
     Imports files from the staging GCS bucket into the Vertex AI RAG corpus.
@@ -246,6 +272,15 @@ def trigger_confluence_gcs_to_rag_engine():
         except Exception as e:
             print(f"        [Error] Batch {batch_num} failed: {e}")
             failed_count += len(batch)
+            with push_failures_lock:
+                for file_uri in batch:
+                    file_name = file_uri.split("/")[-1]
+                    push_failures.append({
+                        "file_name": file_name,
+                        "error_code": type(e).__name__,
+                        "failure_reason": f"Batch {batch_num} import failed: {str(e)}",
+                        "rag_progress_fail_code": "RAG_BATCH_IMPORT"
+                    })
             
         # Small sleep between batches to natively space out rate limit windows
         time.sleep(2.0)
@@ -259,6 +294,9 @@ def trigger_confluence_gcs_to_rag_engine():
 
     # Programmatically apply metadata tags (restricted, source_system, space_name, site_name)
     apply_metadata_to_corpus_files()
+
+    # Save and upload RAG push failures to GCS
+    save_push_failures(gcs_bucket)
 
 
 def apply_metadata_to_corpus_files():
@@ -353,33 +391,63 @@ def apply_metadata_to_corpus_files():
         
         catalog_lock = threading.Lock()
         processed_count = 0
+        schema_missing_flag = threading.Event()
         
         def tag_single_file(rag_file, metadata_entry, source_system):
             nonlocal dirty_catalog, processed_count
+            if schema_missing_flag.is_set():
+                return
             display_name = rag_file.display_name
             restricted = metadata_entry.get("restricted", False)
             space_name = metadata_entry.get("space_name", "")
             site_name = metadata_entry.get("site_name", "")
             
             # Build MetadataValues
-            values = {
-                "restricted": rag.MetadataValue(bool_value=restricted),
-                "source_system": rag.MetadataValue(string_value=source_system)
-            }
-            if space_name:
-                values["space_name"] = rag.MetadataValue(string_value=space_name)
-            if site_name:
-                values["site_name"] = rag.MetadataValue(string_value=site_name)
-                
-            user_metadata = rag.UserSpecifiedMetadata(values=values)
-            rag_metadata = rag.RagMetadata(user_specified_metadata=user_metadata)
+            requests = []
             
-            retry_api_call(
-                rag.batch_create_metadata,
-                corpus_name=corpus_name,
-                file_name=rag_file.name,
-                requests=[rag_metadata]
+            # 1. restricted
+            user_metadata_restricted = rag.UserSpecifiedMetadata(
+                values={"restricted": rag.MetadataValue(bool_value=restricted)}
             )
+            requests.append(rag.RagMetadata(user_specified_metadata=user_metadata_restricted))
+            
+            # 2. source_system
+            if source_system:
+                user_metadata_sys = rag.UserSpecifiedMetadata(
+                    values={"source_system": rag.MetadataValue(string_value=source_system)}
+                )
+                requests.append(rag.RagMetadata(user_specified_metadata=user_metadata_sys))
+            
+            # 3. space_name
+            if space_name:
+                user_metadata_space = rag.UserSpecifiedMetadata(
+                    values={"space_name": rag.MetadataValue(string_value=space_name)}
+                )
+                requests.append(rag.RagMetadata(user_specified_metadata=user_metadata_space))
+                
+            # 4. site_name
+            if site_name:
+                user_metadata_site = rag.UserSpecifiedMetadata(
+                    values={"site_name": rag.MetadataValue(string_value=site_name)}
+                )
+                requests.append(rag.RagMetadata(user_specified_metadata=user_metadata_site))
+
+            try:
+                retry_api_call(
+                    rag.batch_create_metadata,
+                    corpus_name=corpus_name,
+                    file_name=rag_file.name,
+                    requests=requests
+                )
+            except Exception as e:
+                err_msg = str(e)
+                if "RagDataSchema keys do not exist" in err_msg or "keys do not exist" in err_msg:
+                    if not schema_missing_flag.is_set():
+                        schema_missing_flag.set()
+                        print("\n  [Warning] Target RAG Corpus lacks a RagDataSchema. Custom metadata tagging cannot be completed on this corpus.")
+                        print("  [Warning] Bypassing custom metadata tagging. Files are successfully imported and fully searchable!")
+                    return
+                raise e
             
             with catalog_lock:
                 tagged_catalog.add(display_name)
@@ -392,18 +460,40 @@ def apply_metadata_to_corpus_files():
             # Tiny sleep inside thread to prevent hammering API
             time.sleep(0.1)
 
-        # Process with a ThreadPoolExecutor
-        with ThreadPoolExecutor(max_workers=5) as executor:
-            futures = {
-                executor.submit(tag_single_file, rf, me, sys): rf.display_name 
-                for rf, me, sys in files_to_tag
-            }
-            for fut in as_completed(futures):
-                disp_name = futures[fut]
-                try:
-                    fut.result()
-                except Exception as fut_err:
-                    print(f"     [Error] Thread failed tagging file {disp_name}: {fut_err}")
+        # Process with a ThreadPoolExecutor in controlled memory batches to prevent OOM
+        batch_size = 100
+        for chunk_start in range(0, len(files_to_tag), batch_size):
+            if schema_missing_flag.is_set():
+                break
+                
+            chunk = files_to_tag[chunk_start:chunk_start + batch_size]
+            with ThreadPoolExecutor(max_workers=5) as executor:
+                futures = {
+                    executor.submit(tag_single_file, rf, me, sys): rf.display_name 
+                    for rf, me, sys in chunk
+                }
+                for fut in as_completed(futures):
+                    disp_name = futures[fut]
+                    try:
+                        fut.result()
+                    except Exception as fut_err:
+                        if schema_missing_flag.is_set():
+                            continue
+                        print(f"     [Error] Thread failed tagging file {disp_name}: {fut_err}")
+                        with push_failures_lock:
+                            push_failures.append({
+                                "file_name": disp_name,
+                                "error_code": type(fut_err).__name__,
+                                "failure_reason": str(fut_err),
+                                "rag_progress_fail_code": "RAG_METADATA_TAGGING"
+                            })
+
+        if schema_missing_flag.is_set():
+            # Gracefully populate the tagged catalog as skipped to prevent repeated tagging attempts
+            print("  Populating skipped tagging catalog to GCS to bypass metadata updates on subsequent runs.")
+            for rf, _, _ in files_to_tag:
+                tagged_catalog.add(rf.display_name)
+            dirty_catalog = True
                 
     except Exception as list_err:
         print(f"  [Error] Failed listing or tagging corpus files: {list_err}")

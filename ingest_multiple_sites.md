@@ -261,7 +261,39 @@ These security mechanisms are **fully implemented, tested, and active within the
     - **Post-Retrieval Chunk Redaction**: Retained as a redundant safety net. It intercepts the retrieved chunks and does a second pass validation of the user's email or group memberships against the GCS maps.
 *   **Split Permissions Maps (Race-Condition Free)**: Confluence and SharePoint crawlers write page permissions to dedicated GCS files (`gcs_confluence_permissions_map.json` and `gcs_sharepoint_permissions_map.json`), eliminating lost-update race conditions during concurrent crawler jobs. The RAG agent dynamically merges these files in-memory at runtime.
 *   **Post-Sync Metadata Enrichment**: Since Vertex AI's `rag.import_files` is a bulk ingestion tool that does not support fine-grained per-file user-specified metadata, the sync script (`push_rag_engine.py`) runs a programmatic post-sync pass. It reads all corpus files using `rag.list_files()`, matches them to the GCS permission maps, and applies custom metadata tags (such as `space_name`, `site_name`, `restricted`, and `source_system`) using `rag.batch_create_metadata()`.
+    *   *Prerequisite:* In order for the RAG corpus to accept custom metadata keys, a metadata schema must be registered first. A self-contained registration utility `register_rag_schema.py` is included to easily configure any corpus in target GCP environments:
+        ```bash
+        python3 register_rag_schema.py --project YOUR_PROJECT_ID --corpus-id YOUR_RAG_CORPUS_ID --location us-central1
+        ```
 *   **Interactive Simulation dropdown**: The frontend chat interface has been upgraded with a sleek, HSL-themed security role dropdown. You can switch between roles (Guest, Developer, HR Manager, CEO) to instantly simulate query-time ACL evaluation and watch chunks redact in real time!
+
+
+---
+
+## 10. Robust Failure Reporting & Operational Logs
+
+Both Crawford/Ingestion and RAG push pipelines include complete error logging and structured failure collection. In the event of network quotas, file corruption, or API validation constraints (e.g. metadata tagging limits), errors are gathered and uploaded directly to Cloud Storage (`gs://multi-agent-sdlc-bucket/`) using standard, structured naming conventions:
+
+*   **Confluence Ingestion Failures:** `gcs_confluence_failure_results.json`
+*   **SharePoint Ingestion Failures:** `gcs_sharepoint_failure_results.json`
+*   **RAG Push/Tagging Failures:** `gcs_push_rag_failure_results.json`
+
+### Failures JSON Schema
+All files utilize a uniform structure:
+```json
+[
+  {
+    "file_name": "Example_Document.md",
+    "error_code": "InvalidArgument",
+    "failure_reason": "Only one key-value pair is supported in UserSpecifiedMetadata.",
+    "rag_progress_fail_code": "RAG_METADATA_TAGGING"
+  }
+]
+```
+Where `rag_progress_fail_code` represents the execution phase:
+*   `RAG_BATCH_IMPORT`: Failed during the batch file import from GCS to RAG.
+*   `RAG_METADATA_TAGGING`: Failed during the post-sync schema metadata-tagging pass.
+
 
 
 

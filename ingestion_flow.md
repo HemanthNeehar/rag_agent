@@ -118,6 +118,19 @@ space_name: BMEP
 - **Natively Vectorized:** Since this header is part of the text body, the RAG Engine indexes it into the vector space.
 - **Naturally Queryable:** Users mentioning "BMEP" naturally surface these files due to vector overlap.
 
+### B.0 Database Schema Registration (Prerequisite)
+By default, newly created Vertex AI RAG Corpora do not possess any metadata schema columns. To allow custom metadata tagging and CEL query-time filtering, you must register the necessary column schema keys.
+
+A self-contained script `register_rag_schema.py` is provided to perform this registration on your active corpus in any target GCP project:
+```bash
+python3 register_rag_schema.py --project YOUR_PROJECT_ID --corpus-id YOUR_RAG_CORPUS_ID --location us-central1
+```
+This registers:
+* `restricted` (BOOLEAN, FILE level)
+* `space_name` (STRING, FILE level)
+* `site_name` (STRING, FILE level)
+* `source_system` (STRING, FILE level)
+
 ### B. Database-Level Schema Metadata (Post-Sync Enrichment)
 Because bulk GCS import (`rag.import_files`) does not support user-specified metadata directly in its API signature, `push_rag_engine.py` performs a secure **Post-Sync Tagging Pass**:
 1. It retrieves all corpus files via `rag.list_files()`.
@@ -185,3 +198,32 @@ This limits the search space *before* similarity matching, preventing the "Top-K
 The retrieved chunks are evaluated a second time in-memory. If a file's mapped `allowed_users` or `allowed_groups` do not match the user's thread-safe context identity, the chunk is instantly discarded, providing a redundant fail-safe.
 
 This guarantees complete enterprise data safety: **unauthorized users can never access restricted information, and authorized users are never starved of legitimate context.**
+
+---
+
+## 6. Comprehensive Failure Reporting & Operational Auditing
+
+To provide full operational visibility for the enterprise platform and operations teams, the pipelines automatically output detailed, structured JSON failure reports directly to your Cloud Storage bucket (`gs://multi-agent-sdlc-bucket/`). 
+
+### Ingestion & Crawling Failure Reports
+Each connector tracks crawling, API timeouts, permissions exceptions, and file-parsing issues (including attachment parsing failures):
+*   **Confluence Crawler Failures:** Written to `gcs_confluence_failure_results.json` on GCS.
+*   **SharePoint Crawler Failures:** Written to `gcs_sharepoint_failure_results.json` on GCS.
+
+### RAG Engine Push Failure Reports
+*   **RAG Ingestion Failures:** Written to `gcs_push_rag_failure_results.json` on GCS. This file tracks errors during the GCS-to-RAG import or metadata tagging phases.
+
+#### Unified Schema for All Failure Logs:
+```json
+[
+  {
+    "file_name": "Project_Deployment_2026_Plan.md",
+    "error_code": "InvalidArgument",
+    "failure_reason": "Only one key-value pair is supported in UserSpecifiedMetadata.",
+    "rag_progress_fail_code": "RAG_METADATA_TAGGING"
+  }
+]
+```
+Where `rag_progress_fail_code` categorizes the operational phase of the failure:
+*   `RAG_BATCH_IMPORT`: File failed during GCS-to-RAG import.
+*   `RAG_METADATA_TAGGING`: File failed during post-sync metadata tagging.

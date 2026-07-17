@@ -298,29 +298,63 @@ Example of enriched permissions entries:
 }
 ```
 
-### B. Post-Import Batch Metadata Tagging
+### B.1 Metadata Schema Registration (Prerequisite)
+By default, a newly created Vertex AI RAG Corpus does not have any custom metadata schema columns defined. In order to store custom metadata values (such as `restricted`, `space_name`, `site_name`, or `source_system`) and run query-time Common Expression Language (CEL) filtering, the corpus must have these fields registered as a schema first.
+
+We provide a self-contained utility script `register_rag_schema.py` to easily register this schema in any environment or project:
+
+```bash
+# Register schema on your target RAG Corpus
+python3 register_rag_schema.py --project YOUR_PROJECT_ID --corpus-id YOUR_RAG_CORPUS_ID --location us-central1
+```
+
+This registers:
+*   `restricted`: `BOOLEAN` (Granularity: `GRANULARITY_FILE_LEVEL`)
+*   `space_name`: `STRING` (Granularity: `GRANULARITY_FILE_LEVEL`)
+*   `site_name`: `STRING` (Granularity: `GRANULARITY_FILE_LEVEL`)
+*   `source_system`: `STRING` (Granularity: `GRANULARITY_FILE_LEVEL`)
+
+### B.2 Post-Import Batch Metadata Tagging
 Because bulk API import (`rag.import_files`) does not support direct metadata passing in its method signatures, our RAG sync engine (`push_rag_engine.py`) performs a secure **Post-Sync Tagging Pass**:
 1. After importing files into the Vertex AI RAG corpus, the sync job queries all corpus files using `rag.list_files()`.
 2. It matches files by their `display_name` to their corresponding entries in `gcs_confluence_permissions_map.json` and `gcs_sharepoint_permissions_map.json`.
-3. It performs a batch metadata create/update using `rag.batch_create_metadata()`:
+3. It performs a batch metadata create/update using `rag.batch_create_metadata()`. Because Vertex AI RAG APIs enforce a strict constraint that each `UserSpecifiedMetadata` object must contain exactly **one** key-value pair, the pipeline builds separate `RagMetadata` objects for each field and groups them inside the single batch request:
    ```python
-   # Build MetadataValues
-   values = {
-       "restricted": rag.MetadataValue(bool_value=restricted),
-       "source_system": rag.MetadataValue(string_value=source_system)
-   }
-   if space_name:
-       values["space_name"] = rag.MetadataValue(string_value=space_name)
-   if site_name:
-       values["site_name"] = rag.MetadataValue(string_value=site_name)
-       
-   user_metadata = rag.UserSpecifiedMetadata(values=values)
-   rag_metadata = rag.RagMetadata(user_specified_metadata=user_metadata)
+   # Build MetadataValues (Unified Batch Request)
+   requests = []
    
+   # 1. restricted
+   user_metadata_restricted = rag.UserSpecifiedMetadata(
+       values={"restricted": rag.MetadataValue(bool_value=restricted)}
+   )
+   requests.append(rag.RagMetadata(user_specified_metadata=user_metadata_restricted))
+   
+   # 2. source_system
+   if source_system:
+       user_metadata_sys = rag.UserSpecifiedMetadata(
+           values={"source_system": rag.MetadataValue(string_value=source_system)}
+       )
+       requests.append(rag.RagMetadata(user_specified_metadata=user_metadata_sys))
+   
+   # 3. space_name
+   if space_name:
+       user_metadata_space = rag.UserSpecifiedMetadata(
+           values={"space_name": rag.MetadataValue(string_value=space_name)}
+       )
+       requests.append(rag.RagMetadata(user_specified_metadata=user_metadata_space))
+       
+   # 4. site_name
+   if site_name:
+       user_metadata_site = rag.UserSpecifiedMetadata(
+           values={"site_name": rag.MetadataValue(string_value=site_name)}
+       )
+       requests.append(rag.RagMetadata(user_specified_metadata=user_metadata_site))
+   
+   # Run unified batch creation API call
    rag.batch_create_metadata(
        corpus_name=corpus_name,
        file_name=rag_file.name,
-       requests=[rag_metadata]
+       requests=requests
    )
    ```
 
@@ -346,5 +380,31 @@ At retrieval time, the agent (`agent_rag.py`) generates a dynamic Common Express
   ```
 
 This dual-layered architecture provides a incredibly sophisticated, secure, and user-friendly experience, making the agent completely ready for modern enterprise deployments.
+
+---
+
+## 5. Comprehensive Failure Reporting & Operational Auditing
+
+To ensure zero silent data gaps and provide complete operational visibility for IT operations, the pipeline automatically writes detailed error logs and structured JSON failure reports directly to your GCS bucket (`gs://multi-agent-sdlc-bucket/`):
+
+*   **Confluence Ingestion Failures:** `gcs_confluence_failure_results.json`
+*   **SharePoint Ingestion Failures:** `gcs_sharepoint_failure_results.json`
+*   **RAG Push/Tagging Failures:** `gcs_push_rag_failure_results.json`
+
+### Unified Failure JSON Schema:
+```json
+[
+  {
+    "file_name": "Project_Deployment_2026_Plan.md",
+    "error_code": "InvalidArgument",
+    "failure_reason": "Only one key-value pair is supported in UserSpecifiedMetadata.",
+    "rag_progress_fail_code": "RAG_METADATA_TAGGING"
+  }
+]
+```
+Where `rag_progress_fail_code` classifies the operation during which the failure occurred:
+*   `RAG_BATCH_IMPORT`: Failed during the batch file import from GCS to RAG.
+*   `RAG_METADATA_TAGGING`: Failed during the post-sync schema metadata-tagging pass.
+
 
 
