@@ -39,68 +39,64 @@ corpus_name = f"projects/{project_id}/locations/{location}/ragCorpora/{corpus_id
 
 vertexai.init(project=project_id, location=location)
 
-# Load local GCS-to-Confluence and GCS-to-SharePoint URL maps for foolproof source URL resolution
-gcs_map_file = agent_dir / "gcs_confluence_map.json"
+# Load local GCS-to-Confluence and GCS-to-SharePoint URL maps with dynamic GCS fallback
 gcs_to_confluence_map: dict[str, str] = {}
-if gcs_map_file.exists():
-    try:
-        import json
-        with open(gcs_map_file, "r", encoding="utf-8") as f:
-            gcs_to_confluence_map = json.load(f)
-    except Exception as e:
-        print(f"[agent_rag] Failed to load gcs_confluence_map.json: {e}", flush=True)
-
-gcs_sp_map_file = agent_dir / "gcs_sharepoint_map.json"
-if gcs_sp_map_file.exists():
-    try:
-        import json
-        with open(gcs_sp_map_file, "r", encoding="utf-8") as f:
-            gcs_to_confluence_map.update(json.load(f))
-    except Exception as e:
-        print(f"[agent_rag] Failed to load gcs_sharepoint_map.json: {e}", flush=True)
-
-# Load Permissions Map with GCS dynamic download fallback to ensure stateless resilience
 gcs_permissions_map: dict[str, dict] = {}
 bucket_name = os.getenv("RAG_GCS_BUCKET_NAME", "multi-agent-sdlc")
-
-# We download and merge Confluence, SharePoint, and any legacy centralized maps
-permissions_files = {
-    "confluence": "gcs_confluence_permissions_map.json",
-    "sharepoint": "gcs_sharepoint_permissions_map.json",
-    "legacy": "gcs_permissions_map.json"
-}
 
 try:
     from google.cloud import storage
     client = storage.Client(project=project_id)
     bucket = client.bucket(bucket_name)
-    
-    for source_key, filename in permissions_files.items():
+
+    # All state mapping files we want to proactively keep fresh from GCS
+    sync_files = {
+        "confluence_map": ("gcs_confluence_map.json", True),  # (filename, is_url_map)
+        "sharepoint_map": ("gcs_sharepoint_map.json", True),
+        "confluence_perms": ("gcs_confluence_permissions_map.json", False),
+        "sharepoint_perms": ("gcs_sharepoint_permissions_map.json", False),
+        "legacy_perms": ("gcs_permissions_map.json", False)
+    }
+
+    for key, (filename, is_url_map) in sync_files.items():
         local_path = agent_dir / filename
-        # Download from GCS if not locally cached
-        if not local_path.exists():
-            try:
-                blob = bucket.blob(filename)
-                if blob.exists():
-                    blob.download_to_filename(str(local_path))
-                    print(f"[agent_rag] Successfully downloaded {filename} from GCS bucket {bucket_name}", flush=True)
-            except Exception as e:
-                print(f"[agent_rag] Failed downloading {filename} from GCS: {e}", flush=True)
-        
-        # Load and merge
+        # Download from GCS dynamically to ensure stateless correctness in deployed agent
+        try:
+            blob = bucket.blob(filename)
+            if blob.exists():
+                blob.download_to_filename(str(local_path))
+                print(f"[agent_rag] Freshly downloaded {filename} from GCS bucket {bucket_name}", flush=True)
+        except Exception as dl_err:
+            print(f"[agent_rag] GCS download failed for {filename} (will use local fallback): {dl_err}", flush=True)
+
+        # Parse and merge contents
         if local_path.exists():
             try:
                 import json
                 with open(local_path, "r", encoding="utf-8") as f:
                     data = json.load(f)
                     if isinstance(data, dict):
-                        gcs_permissions_map.update(data)
-                        print(f"[agent_rag] Loaded and merged {filename} with {len(data)} entry(s).", flush=True)
-            except Exception as e:
-                print(f"[agent_rag] Failed to load/parse {filename}: {e}", flush=True)
+                        if is_url_map:
+                            gcs_to_confluence_map.update(data)
+                            print(f"[agent_rag] Merged {filename} with {len(data)} URL entry(s).", flush=True)
+                        else:
+                            gcs_permissions_map.update(data)
+                            print(f"[agent_rag] Merged permissions {filename} with {len(data)} entry(s).", flush=True)
+            except Exception as load_err:
+                print(f"[agent_rag] Failed loading/parsing {filename}: {load_err}", flush=True)
 
-except Exception as e:
-    print(f"[agent_rag] Failed to initialize storage client or load maps: {e}", flush=True)
+except Exception as init_err:
+    print(f"[agent_rag] Failed to initialize storage client or load dynamic maps: {init_err}. Using static fallbacks.", flush=True)
+    # Static local fallback if GCS client fails (e.g. offline local development)
+    for filename, is_url_map in [("gcs_confluence_map.json", True), ("gcs_sharepoint_map.json", True)]:
+        local_path = agent_dir / filename
+        if local_path.exists():
+            try:
+                import json
+                with open(local_path, "r", encoding="utf-8") as f:
+                    gcs_to_confluence_map.update(json.load(f))
+            except Exception as e:
+                print(f"[agent_rag] Static fallback load failed for {filename}: {e}", flush=True)
 
 
 

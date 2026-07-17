@@ -1466,6 +1466,12 @@ def fetch_graph_api_data(
                     sites.append(resp.json())
                 except Exception as site_err:
                     print(f"  [Warning] Could not fetch site '{site_name_or_path}' directly: {site_err}")
+                    sharepoint_failures.append({
+                        "file_name": f"Site_{site_name_or_path}",
+                        "error_code": type(site_err).__name__,
+                        "failure_reason": f"Could not fetch site directly: {str(site_err)}",
+                        "site_name": site_name_or_path
+                    })
         else:
             # Fallback to search discovery to find all accessible sites
             search_query = os.getenv("SHAREPOINT_SITE_SEARCH_QUERY", "").strip()

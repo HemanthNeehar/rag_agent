@@ -1516,6 +1516,12 @@ def fetch_confluence_pages(
             except Exception as e:
                 print(f"  [Error] Could not fetch pages for space {space_key}: {e}")
                 has_fetch_errors = True
+                confluence_failures.append({
+                    "file_name": f"Space_{space_key}",
+                    "error_code": type(e).__name__,
+                    "failure_reason": f"Could not fetch space pages directly: {str(e)}",
+                    "space_name": space_key
+                })
                 break
 
             results = data.get("results", [])

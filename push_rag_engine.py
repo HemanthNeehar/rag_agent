@@ -167,6 +167,78 @@ def save_push_failures(gcs_bucket):
         print(f"  [Warning] Failed writing or uploading push failures to GCS: {e}")
 
 
+def parse_partial_failures(gcs_path, batch):
+    """
+    Downloads and parses the Vertex AI RAG Engine asynchronous partial failures file
+    from GCS using gcloud storage cat, handling JSON or CSV output schemas.
+    """
+    try:
+        import csv
+        import io
+        
+        res = subprocess.run(
+            ["gcloud", "storage", "cat", gcs_path],
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        content = res.stdout.strip()
+        if not content:
+            return []
+            
+        parsed_failures = []
+        # 1. Attempt JSON parsing
+        if content.startswith("[") or content.startswith("{"):
+            try:
+                data = json.loads(content)
+                items = []
+                if isinstance(data, list):
+                    items = data
+                elif isinstance(data, dict):
+                    items = data.get("failures") or data.get("partial_failures") or []
+                
+                for item in items:
+                    uri = item.get("source_uri") or item.get("file_gcs_uri") or ""
+                    fname = uri.split("/")[-1] if uri else "unknown"
+                    reason = item.get("error_message") or item.get("message") or "Unknown RAG import error"
+                    err_code = item.get("error_code") or "ImportError"
+                    parsed_failures.append((fname, err_code, reason))
+            except Exception:
+                pass
+                
+        # 2. Attempt CSV parsing as fallback
+        if not parsed_failures:
+            f = io.StringIO(content)
+            reader = csv.reader(f)
+            headers = next(reader, None)
+            if headers:
+                gcs_idx, msg_idx, code_idx = -1, -1, -1
+                for idx, h in enumerate(headers):
+                    h_lower = h.lower()
+                    if "uri" in h_lower or "gcs" in h_lower or "file" in h_lower:
+                        gcs_idx = idx
+                    elif "message" in h_lower or "reason" in h_lower or "error" in h_lower:
+                        msg_idx = idx
+                    elif "code" in h_lower or "status" in h_lower:
+                        code_idx = idx
+                
+                if gcs_idx == -1: gcs_idx = 0
+                if msg_idx == -1: msg_idx = 1
+                
+                for row in reader:
+                    if len(row) > max(gcs_idx, msg_idx):
+                        uri = row[gcs_idx]
+                        fname = uri.split("/")[-1] if uri else "unknown"
+                        reason = row[msg_idx]
+                        err_code = row[code_idx] if (code_idx != -1 and len(row) > code_idx) else "ImportError"
+                        parsed_failures.append((fname, err_code, reason))
+                        
+        return parsed_failures
+    except Exception as e:
+        print(f"        [Warning] Failed parsing partial failures file at {gcs_path}: {e}")
+        return []
+
+
 def trigger_confluence_gcs_to_rag_engine():
     """
     Imports files from the staging GCS bucket into the Vertex AI RAG corpus.
@@ -269,6 +341,34 @@ def trigger_confluence_gcs_to_rag_engine():
             imported_count += response.imported_rag_files_count
             failed_count += response.failed_rag_files_count
             print(f"        Batch complete. Imported: {response.imported_rag_files_count}, Failed: {response.failed_rag_files_count}")
+            
+            if response.failed_rag_files_count > 0:
+                gcs_path = getattr(response, "partial_failures_gcs_path", "")
+                failures_list = []
+                if gcs_path:
+                    print(f"        -> Extracting {response.failed_rag_files_count} detailed failures from {gcs_path}...")
+                    failures_list = parse_partial_failures(gcs_path, batch)
+                
+                with push_failures_lock:
+                    if failures_list:
+                        for fname, err_code, reason in failures_list:
+                            push_failures.append({
+                                "file_name": fname,
+                                "error_code": err_code,
+                                "failure_reason": reason,
+                                "rag_progress_fail_code": "RAG_BATCH_IMPORT"
+                            })
+                    else:
+                        print(f"        -> Appending placeholder details for the {response.failed_rag_files_count} failed files in this batch...")
+                        # Map back to filenames in this batch as fallback
+                        for file_uri in batch[:response.failed_rag_files_count]:
+                            file_name = file_uri.split("/")[-1]
+                            push_failures.append({
+                                "file_name": file_name,
+                                "error_code": "ImportError",
+                                "failure_reason": f"Import failed during batch {batch_num}. See partial failures GCS path: {gcs_path or 'N/A'}",
+                                "rag_progress_fail_code": "RAG_BATCH_IMPORT"
+                            })
         except Exception as e:
             print(f"        [Error] Batch {batch_num} failed: {e}")
             failed_count += len(batch)
