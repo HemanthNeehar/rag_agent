@@ -1498,21 +1498,47 @@ def fetch_confluence_pages(
         limit = 50
         while True:
             try:
-                pages_resp = httpx.get(
-                    f"{base_api}/content",
-                    auth=auth,
-                    headers=headers,
-                    params={
-                        "spaceKey": space_key,
-                        "type": "page",
-                        "start": start,
-                        "limit": limit,
-                        "expand": "body.storage,version",  # Expand page version info
-                    },
-                    timeout=30,
-                )
-                pages_resp.raise_for_status()
-                data = pages_resp.json()
+                # Robust exponential backoff retries & longer timeout for fetching space pages
+                data = {}
+                retries = 3
+                backoff = 2
+                import time
+                for attempt in range(retries):
+                    try:
+                        pages_resp = httpx.get(
+                            f"{base_api}/content",
+                            auth=auth,
+                            headers=headers,
+                            params={
+                                "spaceKey": space_key,
+                                "type": "page",
+                                "start": start,
+                                "limit": limit,
+                                "expand": "body.storage,version",
+                            },
+                            timeout=90,
+                        )
+                        pages_resp.raise_for_status()
+                        data = pages_resp.json()
+                        break # Success! Break retry loop
+                    except httpx.HTTPStatusError as http_err:
+                        if http_err.response.status_code == 429:
+                            retry_after = int(http_err.response.headers.get("Retry-After", backoff * (attempt + 1)))
+                            print(f"     [Warning] Rate-limited (HTTP 429) fetching pages for space {space_key}. Retrying after {retry_after}s...")
+                            time.sleep(retry_after)
+                        else:
+                            if attempt == retries - 1:
+                                raise
+                            time.sleep(backoff ** attempt)
+                    except (httpx.ReadTimeout, httpx.ConnectTimeout) as timeout_err:
+                        print(f"     [Warning] Timeout fetching pages for space {space_key} (Attempt {attempt+1}/{retries}): {timeout_err}")
+                        if attempt == retries - 1:
+                            raise
+                        time.sleep(backoff ** attempt)
+                    except Exception as other_err:
+                        if attempt == retries - 1:
+                            raise
+                        time.sleep(backoff ** attempt)
             except Exception as e:
                 print(f"  [Error] Could not fetch pages for space {space_key}: {e}")
                 has_fetch_errors = True

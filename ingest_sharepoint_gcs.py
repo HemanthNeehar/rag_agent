@@ -1509,7 +1509,7 @@ def fetch_graph_api_data(
     all_items_to_crawl = []
     
     # Local downloader function factory
-    def make_download_fn(download_url: str, content_url: str, headers: dict, temp_path: Path):
+    def make_download_fn(download_url: str, content_url: str, headers_snapshot: dict, temp_path: Path):
         def fn():
             try:
                 max_size_mb = int(os.getenv("SHAREPOINT_MAX_FILE_SIZE_MB", "500"))
@@ -1517,7 +1517,14 @@ def fetch_graph_api_data(
 
                 # Helper to perform stream download with limit check
                 def stream_download(url, use_headers=False):
-                    req_headers = headers if use_headers else None
+                    req_headers = None
+                    if use_headers:
+                        # Dynamically acquire a fresh access token to prevent 401 expiration errors during long crawls
+                        fresh_token = get_msal_token()
+                        if fresh_token:
+                            req_headers = {"Authorization": f"Bearer {fresh_token}"}
+                        else:
+                            req_headers = headers_snapshot
                     with httpx.stream("GET", url, headers=req_headers, follow_redirects=True, timeout=120) as r:
                         r.raise_for_status()
                         
@@ -1608,9 +1615,35 @@ def fetch_graph_api_data(
                         children_url = f"{base_url}/drives/{drive_id}/items/{folder_id}/children"
                         
                     try:
-                        c_resp = httpx.get(children_url, headers=headers, timeout=30)
-                        c_resp.raise_for_status()
-                        children = c_resp.json().get("value", [])
+                        # Listing folder children with robust exponential backoff retries & longer timeout
+                        children = []
+                        retries = 3
+                        backoff = 2
+                        import time
+                        for attempt in range(retries):
+                            try:
+                                c_resp = httpx.get(children_url, headers=headers, timeout=90)
+                                c_resp.raise_for_status()
+                                children = c_resp.json().get("value", [])
+                                break # Success! Break retry loop
+                            except httpx.HTTPStatusError as http_err:
+                                if http_err.response.status_code == 429:
+                                    retry_after = int(http_err.response.headers.get("Retry-After", backoff * (attempt + 1)))
+                                    print(f"     [Warning] Rate-limited (HTTP 429) listing folder {folder_id}. Retrying after {retry_after}s...")
+                                    time.sleep(retry_after)
+                                else:
+                                    if attempt == retries - 1:
+                                        raise
+                                    time.sleep(backoff ** attempt)
+                            except (httpx.ReadTimeout, httpx.ConnectTimeout) as timeout_err:
+                                print(f"     [Warning] Timeout listing folder {folder_id} (Attempt {attempt+1}/{retries}): {timeout_err}")
+                                if attempt == retries - 1:
+                                    raise
+                                time.sleep(backoff ** attempt)
+                            except Exception as other_err:
+                                if attempt == retries - 1:
+                                        raise
+                                time.sleep(backoff ** attempt)
                         
                         for item in children:
                             item_name = item.get("name")

@@ -62,15 +62,15 @@ graph TD
 ## 2. Step-by-Step Technical Execution
 
 ### Step 1: Remote Crawling & Filtering
-*   **Confluence:** Crawls pages across specified spaces (configured via the comma-separated `CONFLUENCE_SPACES` environment variable).
-*   **SharePoint:** Scans configured sites and libraries for documents.
+*   **Confluence:** Crawls pages across specified spaces (configured via the comma-separated `CONFLUENCE_SPACES` environment variable) using an active **90-second request timeout** and a **3-attempt exponential backoff retry system** with rate-limit compliance to prevent space skipping on sluggish connections.
+*   **SharePoint:** Scans configured sites and libraries for documents. To prevent timeouts on massive folders with thousands of files, the child listing requests operate with a **90-second timeout**, a **3-attempt retry loop**, and automatic sleep handling upon receiving `429 Rate Limited` responses.
 *   **Cache Validation:** Compares modified timestamps of remote files with the locally stored (and GCS-synchronized) `ingestion_catalog.json`. Unmodified files are instantly skipped, enabling lightning-fast incremental synchronization.
 
 ### Step 2: Content Parsing & Multimodal Enrichment
 *   **Image Captioning:** Inline page images are extracted, verified to be above `15 KB` (to ignore small icons/UI buttons), and captioned in parallel using `gemini-2.5-flash` to generate rich semantic text explanations.
 *   **Attachment Handling:** Support for Word (.docx), Excel (.xlsx), PowerPoint (.pptx), and PDFs.
 *   **Gemini Parser & Fallback:** Documents are parsed using the high-performance Gemini Document API. If the system hits API limits (HTTP 429), it automatically routes files through robust **local parsers** (PyPDF, docx, openpyxl, pptx) to ensure completion.
-*   **Excel Memory-Safety:** Large spreadsheets are processed using a memory-safe, streaming chunk-splitter that breaks sheets into manageable markdown tables without overloading container RAM.
+*   **Excel Memory-Safety:** Large spreadsheets are processed using a memory-safe, streaming chunk-splitter that breaks sheets into manageable markdown tables without overloading container RAM. Files exceeding `SHAREPOINT_MAX_FILE_SIZE_MB` (default 500MB) are gracefully skipped to avoid Out-Of-Memory (OOM) fatal crashes.
 
 ### Step 3: Markdown Structuring & Text-Embedded Metadata
 *   The raw document text, captioned images, and parsed attachment contents are structured into unified Markdown (.md) documents.
@@ -227,3 +227,23 @@ Each connector tracks crawling, API timeouts, permissions exceptions, and file-p
 Where `rag_progress_fail_code` categorizes the operational phase of the failure:
 *   `RAG_BATCH_IMPORT`: File failed during GCS-to-RAG import.
 *   `RAG_METADATA_TAGGING`: File failed during post-sync metadata tagging.
+
+---
+
+## 7. Enterprise Robustness, Throttling & Self-Healing Auth
+
+Our recent core updates added advanced enterprise-grade resilience to shield the crawlers against API limits and extremely slow corporate environments:
+
+### A. Non-Blocking Exponential Retry Loops
+When making requests to SharePoint (Microsoft Graph API) or Confluence REST APIs for folder structures and page listings, transient network blips or busy gateway servers can raise read timeouts.
+*   **Timeout Increase:** All critical listing timeouts have been expanded from **30 seconds to 90 seconds**.
+*   **Exponential Retry backoffs:** Failed listing requests are re-attempted up to **3 times** using a binary exponential backoff loop (`time.sleep(backoff ** attempt)`). This prevents a transient timeout from skipping entire directory trees or spaces.
+
+### B. Proactive HTTP 429 Rate Limit Compliance
+In enterprise networks, rapid paginated listings will trigger rate limiting (HTTP Status Code 429).
+*   **Sleep Enforcement:** The retry handler catches HTTP 429 exceptions, parses the `Retry-After` header sent by Microsoft Graph or Atlassian, and sleeps for the requested duration before retrying. This guarantees that your crawlers gracefully wait out throttling states instead of getting blacklisted.
+
+### C. Self-Healing Authentication (The Thread-Level Auth Guard)
+In large crawls taking longer than 1 hour, the unauthenticated pre-signed file download URLs (`tempauth`) and the initial Microsoft Graph Bearer Access Token (valid for exactly 1 hour) will expire.
+*   **Dynamic Token Retrieval:** Instead of using a stale, snapshotted authorization header snapshotted at startup, our multi-threaded thread pools dynamically request a fresh access token via `get_msal_token()` on demand whenever an authenticated fallback download (`/content`) is performed.
+*   Since `get_msal_token()` performs MSAL silent cache checks (less than 1ms runtime when active) and automatically triggers refresh-token flows if expired, the crawler is now **100% immune to 401 Unauthorized download interruptions**, regardless of how long the crawling job runs!

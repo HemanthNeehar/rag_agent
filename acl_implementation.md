@@ -211,10 +211,10 @@ To minimize expensive LLM API usage, eliminate rate-limiting bottlenecks, and dr
 graph TD
     File[Incoming File / Attachment] --> Type{Source / Format?}
     
-    Type -->|Confluence Space Page| LocalHTML[Local XHTML to MD Parser<br>0 LLM calls, <5ms per page]
+    Type -->|Confluence Space Page| LocalHTML["Local XHTML to MD Parser<br>0 LLM calls, &lt;5ms per page"]
     Type -->|Standard PDF / DOCX / PPTX| Selectable{Contains Selectable Text?}
     
-    Selectable -->|Yes| LocalExtract[Local Text Extraction<br>PyPDF / python-docx / python-pptx]
+    Selectable -->|Yes| LocalExtract["Local Text Extraction<br>PyPDF / python-docx / python-pptx"]
     Selectable -->|No (Scanned File)| GeminiOCR[Route to Gemini for Multimodal OCR]
     
     LocalExtract --> ImageCheck{Has Embedded Images?}
@@ -383,7 +383,7 @@ This dual-layered architecture provides a incredibly sophisticated, secure, and 
 
 ---
 
-## 5. Comprehensive Failure Reporting & Operational Auditing
+## 8. Comprehensive Failure Reporting & Operational Auditing
 
 To ensure zero silent data gaps and provide complete operational visibility for IT operations, the pipeline automatically writes detailed error logs and structured JSON failure reports directly to your GCS bucket (`gs://multi-agent-sdlc-bucket/`):
 
