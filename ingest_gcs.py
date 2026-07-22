@@ -1300,84 +1300,86 @@ def process_single_page(
                             atts_temp_dir.mkdir(exist_ok=True)
                             
                             local_att_path = download_attachment(conf_url, auth, page_id, att, atts_temp_dir, headers=headers)
-                            if local_att_path and local_att_path.exists():
-                                try:
-                                    content_parts, extracted_image_names = parse_attachment_to_markdown(
-                                        local_att_path,
-                                        gemini_client,
-                                        page_temp_images_dir,
-                                        bucket_name
-                                    )
+                            if not local_att_path or not local_att_path.exists():
+                                raise RuntimeError(f"Attachment download failed for: {att_title}")
+                                
+                            try:
+                                content_parts, extracted_image_names = parse_attachment_to_markdown(
+                                    local_att_path,
+                                    gemini_client,
+                                    page_temp_images_dir,
+                                    bucket_name
+                                )
                                     
-                                    # Upload extracted images to GCS and delete them immediately
-                                    for safe_name in extracted_image_names:
-                                        img_path = page_temp_images_dir / safe_name
-                                        if img_path.exists():
+                                # Upload extracted images to GCS and delete them immediately
+                                for safe_name in extracted_image_names:
+                                    img_path = page_temp_images_dir / safe_name
+                                    if img_path.exists():
+                                        try:
+                                            if upload_file_to_gcs(img_path, f"gs://{bucket_name}/images/{safe_name}"):
+                                                print(f"     -> [GCS] Uploaded extracted image: {safe_name}")
+                                        except Exception as ex:
+                                            print(f"     [Warning] Failed uploading extracted image {safe_name}: {ex}")
+                                        finally:
                                             try:
-                                                if upload_file_to_gcs(img_path, f"gs://{bucket_name}/images/{safe_name}"):
-                                                    print(f"     -> [GCS] Uploaded extracted image: {safe_name}")
-                                            except Exception as ex:
-                                                print(f"     [Warning] Failed uploading extracted image {safe_name}: {ex}")
-                                            finally:
-                                                try:
-                                                    if img_path.exists():
-                                                        img_path.unlink()
-                                                except Exception as del_err:
-                                                    print(f"     [Warning] Failed deleting local extracted image {safe_name}: {del_err}")
+                                                if img_path.exists():
+                                                    img_path.unlink()
+                                            except Exception as del_err:
+                                                print(f"     [Warning] Failed deleting local extracted image {safe_name}: {del_err}")
+                                
+                                # Create separate documents for each chunk/part
+                                att_id_base = f"confluence_{page_id}_attachment_{att['id']}"
+                                att_doc_title_base = f"[Attachment] {title} - {att_title}"
+                                
+                                uploaded_filenames = []
+                                for part_suffix, part_content in content_parts:
+                                    part_id = att_id_base
+                                    if part_suffix:
+                                        safe_suffix = part_suffix.lower().replace(" ", "_").replace("-", "_").strip("_")
+                                        part_id = f"{att_id_base}_{safe_suffix}"
+                                    part_doc_title = f"{att_doc_title_base}{part_suffix}"
                                     
-                                    # Create separate documents for each chunk/part
-                                    att_id_base = f"confluence_{page_id}_attachment_{att['id']}"
-                                    att_doc_title_base = f"[Attachment] {title} - {att_title}"
+                                    doc = {
+                                        "id": part_id,
+                                        "title": part_doc_title,
+                                        "content": part_content,
+                                        "source": "Confluence",
+                                        "url": page_url,
+                                        "restricted": permissions.get("restricted", False),
+                                        "allowed_users": permissions.get("allowed_users", []),
+                                        "allowed_groups": permissions.get("allowed_groups", []),
+                                        "space_name": permissions.get("space_name", ""),
+                                    }
                                     
-                                    uploaded_filenames = []
-                                    for part_suffix, part_content in content_parts:
-                                        part_id = att_id_base
-                                        if part_suffix:
-                                            safe_suffix = part_suffix.lower().replace(" ", "_").replace("-", "_").strip("_")
-                                            part_id = f"{att_id_base}_{safe_suffix}"
-                                        part_doc_title = f"{att_doc_title_base}{part_suffix}"
-                                        
-                                        doc = {
-                                            "id": part_id,
-                                            "title": part_doc_title,
-                                            "content": part_content,
-                                            "source": "Confluence",
-                                            "url": page_url,
-                                            "restricted": permissions.get("restricted", False),
-                                            "allowed_users": permissions.get("allowed_users", []),
-                                            "allowed_groups": permissions.get("allowed_groups", []),
-                                            "space_name": permissions.get("space_name", ""),
-                                        }
-                                        
-                                        # Upload immediately!
-                                        fn = save_and_upload_markdown_doc(doc, page_temp_images_dir, bucket_name)
-                                        uploaded_filenames.append(fn)
-                                        with state_lock:
-                                            gcs_confluence_map[fn] = page_url
-                                            if gcs_permissions_map is not None:
-                                                gcs_permissions_map[fn] = permissions
-                                        
-                                        print(f"     -> Successfully prepared & uploaded attachment document: {part_doc_title}")
-                                    
-                                    # Update catalog for this attachment immediately
+                                    # Upload immediately!
+                                    fn = save_and_upload_markdown_doc(doc, page_temp_images_dir, bucket_name)
+                                    uploaded_filenames.append(fn)
                                     with state_lock:
-                                        catalog[att_catalog_key] = {
-                                            "version": att_version,
-                                            "title": att_title,
-                                            "filenames": uploaded_filenames,
-                                            "page_id": page_id,
-                                            "space_key": space_key,
-                                        }
-                                        # Save state files and upload if needed
-                                        save_state_incrementally(catalog, gcs_confluence_map, bucket_name, gcs_permissions_map)
+                                        gcs_confluence_map[fn] = page_url
+                                        if gcs_permissions_map is not None:
+                                            gcs_permissions_map[fn] = permissions
+                                    
+                                    print(f"     -> Successfully prepared & uploaded attachment document: {part_doc_title}")
+                                
+                                # Update catalog for this attachment immediately
+                                with state_lock:
+                                    catalog[att_catalog_key] = {
+                                        "version": att_version,
+                                        "title": att_title,
+                                        "filenames": uploaded_filenames,
+                                        "page_id": page_id,
+                                        "space_key": space_key,
+                                    }
+                                    # Save state files and upload if needed
+                                    save_state_incrementally(catalog, gcs_confluence_map, bucket_name, gcs_permissions_map)
                                         
-                                finally:
-                                    try:
-                                        if local_att_path and local_att_path.exists():
-                                            local_att_path.unlink()
-                                            print(f"     -> Deleted temporary attachment file: {local_att_path.name}")
-                                    except Exception as del_err:
-                                        print(f"     [Warning] Failed deleting temporary attachment file: {del_err}")
+                            finally:
+                                try:
+                                    if local_att_path and local_att_path.exists():
+                                        local_att_path.unlink()
+                                        print(f"     -> Deleted temporary attachment file: {local_att_path.name}")
+                                except Exception as del_err:
+                                    print(f"     [Warning] Failed deleting temporary attachment file: {del_err}")
         except Exception as e:
             print(f"     [Warning] Failed processing attachments for page '{title}': {e}")
             with state_lock:

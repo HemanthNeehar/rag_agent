@@ -1094,7 +1094,7 @@ def process_file_item(
         if ext in (".png", ".jpg"):
             local_path = download_fn()
             if not local_path or not local_path.exists():
-                return [], None
+                raise RuntimeError("Download failed - check crawl logs for detailed network errors.")
                 
             try:
                 img_bytes = local_path.read_bytes()
@@ -1182,7 +1182,7 @@ def process_file_item(
             # Standard Document
             local_path = download_fn()
             if not local_path or not local_path.exists():
-                return [], None
+                raise RuntimeError("Download failed - check crawl logs for detailed network errors.")
                 
             # Hard fail-safe check on size of downloaded file to prevent in-memory tmpfs OOM
             file_size = local_path.stat().st_size
@@ -1555,13 +1555,16 @@ def fetch_graph_api_data(
                 # 1. Try pre-signed downloadUrl (unauthenticated)
                 if download_url:
                     print(f"     [Debug] Downloading {temp_path.name} via downloadUrl...")
-                    success, limit_exceeded = stream_download(download_url, use_headers=False)
-                    if limit_exceeded:
-                        return None
-                    if success and temp_path.exists() and temp_path.stat().st_size > 0:
-                        return temp_path
-                    else:
-                        print(f"     [Info] Pre-signed downloadUrl for {temp_path.name} returned 0 bytes or failed. Trying /content fallback...")
+                    try:
+                        success, limit_exceeded = stream_download(download_url, use_headers=False)
+                        if limit_exceeded:
+                            return None
+                        if success and temp_path.exists() and temp_path.stat().st_size > 0:
+                            return temp_path
+                        else:
+                            print(f"     [Info] Pre-signed downloadUrl for {temp_path.name} returned 0 bytes or failed. Trying /content fallback...")
+                    except Exception as pre_err:
+                        print(f"     [Warning] Pre-signed downloadUrl failed for {temp_path.name} ({pre_err}). Trying /content fallback...")
 
                 # 2. Try authenticated Graph API /content endpoint fallback
                 if content_url:

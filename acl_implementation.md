@@ -209,18 +209,18 @@ To minimize expensive LLM API usage, eliminate rate-limiting bottlenecks, and dr
 
 ```mermaid
 graph TD
-    File[Incoming File / Attachment] --> Type{Source / Format?}
+    File["Incoming File / Attachment"] --> Type{"Source / Format?"}
     
-    Type -->|Confluence Space Page| LocalHTML["Local XHTML to MD Parser<br>0 LLM calls, &lt;5ms per page"]
-    Type -->|Standard PDF / DOCX / PPTX| Selectable{Contains Selectable Text?}
+    Type -->|"Confluence Space Page"| LocalHTML["Local XHTML to MD Parser<br>0 LLM calls, &lt;5ms per page"]
+    Type -->|"Standard PDF / DOCX / PPTX"| Selectable{"Contains Selectable Text?"}
     
-    Selectable -->|Yes| LocalExtract["Local Text Extraction<br>PyPDF / python-docx / python-pptx"]
-    Selectable -->|No (Scanned File)| GeminiOCR[Route to Gemini for Multimodal OCR]
+    Selectable -->|"Yes"| LocalExtract["Local Text Extraction<br>PyPDF / python-docx / python-pptx"]
+    Selectable -->|"No (Scanned File)"| GeminiOCR["Route to Gemini for Multimodal OCR"]
     
-    LocalExtract --> ImageCheck{Has Embedded Images?}
-    ImageCheck -->|Yes| ExtractImg[Local Image Extraction]
-    ExtractImg --> GeminiCap[Route ONLY Images to Gemini for Captioning]
-    ImageCheck -->|No| FinalMD[Compile Final Enriched Markdown]
+    LocalExtract --> ImageCheck{"Has Embedded Images?"}
+    ImageCheck -->|"Yes"| ExtractImg["Local Image Extraction"]
+    ExtractImg --> GeminiCap["Route ONLY Images to Gemini for Captioning"]
+    ImageCheck -->|"No"| FinalMD["Compile Final Enriched Markdown"]
     
     LocalHTML --> FinalMD
     GeminiOCR --> FinalMD
