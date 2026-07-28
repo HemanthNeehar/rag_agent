@@ -92,7 +92,7 @@ async def run_query(message: str, user_email: str, user_groups: list, label: str
         print(f"\n [Error] Query failed: {e}")
 
 async def main():
-    # TEST TARGET: GIT_Counts.xlsx or Drawing.vsdx (which are restricted under CMTOMApplicationSite)
+    # TEST TARGET: GIT_Counts.xlsx or Drawing.vsdx (which are restricted under YourApplicationSite)
     target_query = "What is the content of GIT_Counts.xlsx?"
     
     # -------------------------------------------------------------------------

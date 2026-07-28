@@ -166,11 +166,11 @@ To control the site crawling scope, configure the following variables in your `.
     *   *Behavior:* Defines the Microsoft Graph API search query to discover sites. 
     *   *Usage:* If set to `""` or left blank, the crawler automatically falls back to `*` to fetch all SharePoint sites your authenticated client credentials have access to. You can also specify a search term (e.g., `"CMTOM"`) to find sites containing that name.
 2.  **`SHAREPOINT_SINGLE_SITE_PATH`** (Optional)
-    *   *Behavior:* Targets a single, specific site path directly (e.g., `/sites/CMTOMApplicationSite`), preserving backward compatibility.
+    *   *Behavior:* Targets a single, specific site path directly (e.g., `/sites/YourApplicationSite`), preserving backward compatibility.
     *   *Usage:* If defined, it bypasses the search discovery and queries only this single site.
 3.  **`SHAREPOINT_SITES_LIST`** (Optional)
     *   *Behavior:* Serves as a post-discovery whitelist filter (comma-separated list of site names or displayNames).
-    *   *Usage:* Even if the crawler discovers all accessible tenant sites, setting this will restrict the processed scope to only these specific sites (e.g., `SHAREPOINT_SITES_LIST=CMTOMApplicationSite, AnotherSite`).
+    *   *Usage:* Even if the crawler discovers all accessible tenant sites, setting this will restrict the processed scope to only these specific sites (e.g., `SHAREPOINT_SITES_LIST=YourApplicationSite, AnotherSite`).
 
 ### B. Execution Logs
 
@@ -185,12 +185,12 @@ The ingestion engine now emits explicit, structured logs during the crawl and pa
 *   **Crawling Log:**
     ```text
     -> Crawling Document Libraries for all sites...
-       -> Crawling site: 'CMTOMApplicationSite'...
+       -> Crawling site: 'YourApplicationSite'...
        -> Crawling site: 'AnotherSite'...
     ```
 *   **Ingestion Log:**
     ```text
-    [Ingest] Processing modified/new SharePoint file: BMOMUI_CommitOrder.docx [Site: CMTOMApplicationSite]
+    [Ingest] Processing modified/new SharePoint file: BMOMUI_CommitOrder.docx [Site: YourApplicationSite]
     ```
 
 ---

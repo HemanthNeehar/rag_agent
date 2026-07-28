@@ -227,7 +227,7 @@ if __name__ == "__main__":
 *   **Lines**: `1428 - 1507`
 *   **Code Mechanics**:
     1. **Flexible Discovery Paths**:
-       - `SHAREPOINT_SINGLE_SITE_PATH`: Targets a single site path directly (`/sites/CMTOMApplicationSite`).
+       - `SHAREPOINT_SINGLE_SITE_PATH`: Targets a single site path directly (`/sites/YourApplicationSite`).
        - `SHAREPOINT_SITES_LIST`: Direct whitelist to bypass global search.
        - `SHAREPOINT_SITE_SEARCH_QUERY`: Global search query (defaults to `*`).
     2. **403 Diagnostic Logger** (lines `1490-1494`):

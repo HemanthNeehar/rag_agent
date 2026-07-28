@@ -63,7 +63,7 @@ def run_visio_only_ingestion():
     # 1. Fetch sites
     site_filter = [s.strip() for s in os.getenv("SHAREPOINT_SITES_LIST", "").split(",") if s.strip()]
     env_my_site = os.getenv("SHAREPOINT_SINGLE_SITE_PATH")
-    my_tenant = os.getenv("SHAREPOINT_TENANT", "centurylink.sharepoint.com")
+    my_tenant = os.getenv("SHAREPOINT_TENANT", "your-organization.sharepoint.com")
 
     sites = []
     try:
@@ -88,7 +88,7 @@ def run_visio_only_ingestion():
         print(f"[Warning] Site discovery error: {site_err}")
 
     if not sites:
-        url = f"{base_url}/sites/{my_tenant}:/sites/CMTOMApplicationSite"
+        url = f"{base_url}/sites/{my_tenant}:/sites/YourApplicationSite"
         resp = httpx.get(url, headers=headers, timeout=60)
         if resp.status_code == 200:
             sites = [resp.json()]

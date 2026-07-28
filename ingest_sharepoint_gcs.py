@@ -1564,8 +1564,8 @@ def fetch_graph_api_data(
     """Queries Graph API to discover sites, list libraries, download and parse files in parallel."""
     headers = {"Authorization": f"Bearer {token}"}
     base_url = "https://graph.microsoft.com/v1.0"
-    my_tenant = "centurylink.sharepoint.com"
-    my_site = "/sites/CMTOMApplicationSite"
+    my_tenant = "your-organization.sharepoint.com"
+    my_site = "/sites/YourApplicationSite"
 
     # 1. Discover SharePoint sites via Graph API
     print("  -> Discovering SharePoint sites via Graph API...")
@@ -1617,7 +1617,7 @@ def fetch_graph_api_data(
         print(f"  [Error] Failed discovering sites: {e}")
         if "403" in str(e):
             print("  [Tip] 403 Forbidden on global search usually means your Graph API registration lacks tenant-wide 'Sites.Read.All' search permissions.")
-            print("        To crawl specific sites, please list them directly in the 'SHAREPOINT_SITES_LIST' environment variable (e.g. CMTOMApplicationSite).")
+            print("        To crawl specific sites, please list them directly in the 'SHAREPOINT_SITES_LIST' environment variable (e.g. YourApplicationSite).")
             print("        This bypasses global search and fetches those specific sites directly by path.")
         return []
         
