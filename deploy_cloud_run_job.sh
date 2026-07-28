@@ -70,8 +70,8 @@ if os.path.exists("../.env"):
 
 echo "-> Creating/Updating Cloud Run Jobs with Direct VPC egress..."
 
-NETWORK="project-gebu-demo-sandbox-spoke-vpc"
-SUBNET="project-gebu-demo-sandbox-spoke-vpc"
+NETWORK="project-agent-ops-494011-spoke-vpc"
+SUBNET="project-agent-ops-494011-spoke-vpc"
 
 # Prepare env-vars-file argument if env.yaml exists
 ENV_VARS_ARG=""

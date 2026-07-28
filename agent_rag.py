@@ -32,12 +32,83 @@ if service_account_path:
         os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = service_account_path
         os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "TRUE"
 
-project_id = os.getenv("GOOGLE_CLOUD_PROJECT", "gebu-demo-sandbox")
-location = os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
-corpus_id = os.getenv("RAG_CORPUS_ID", "6301661778598166528")
-corpus_name = f"projects/{project_id}/locations/{location}/ragCorpora/{corpus_id}"
+engine_project = os.getenv("GOOGLE_CLOUD_PROJECT", "405625028294")
+engine_location = os.getenv("GOOGLE_CLOUD_LOCATION", "us-south1")
 
-vertexai.init(project=project_id, location=location)
+# RAG Corpus configuration (target project 405625028294 / us-south1)
+rag_project_id = os.getenv("RAG_PROJECT_ID") or "405625028294"
+project_id = rag_project_id
+rag_corpus_location = os.getenv("RAG_CORPUS_LOCATION", "us-south1")
+corpus_id = os.getenv("RAG_CORPUS_ID", "7991637538768945152")
+corpus_name = f"projects/{rag_project_id}/locations/{rag_corpus_location}/ragCorpora/{corpus_id}"
+
+print(f"[agent_rag] Initializing global Vertex AI for Reasoning Engine: {engine_project}/{engine_location}", flush=True)
+print(f"[agent_rag] Target RAG Corpus: {corpus_name}", flush=True)
+
+vertexai.init(project=engine_project, location=engine_location)
+
+# Standalone, global monkeypatch of google.adk's Runner to strip user_email and auto-create Playground sessions
+try:
+    from google.adk.runners import Runner
+    
+    if not getattr(Runner, "_is_patched_for_acl", False):
+        original_run_async = Runner.run_async
+        original_run = Runner.run
+        original_get_or_create = getattr(Runner, "_get_or_create_session", None)
+        
+        async def patched_get_or_create_session(self, *, user_id: str, session_id: str, get_session_config=None):
+            session = await self.session_service.get_session(
+                app_name=self.app_name,
+                user_id=user_id,
+                session_id=session_id,
+                config=get_session_config,
+            )
+            if not session:
+                print(f"[agent_rag] Session {session_id} not found; auto-creating new session for user {user_id}", flush=True)
+                session = await self.session_service.create_session(
+                    app_name=self.app_name, user_id=user_id, session_id=session_id
+                )
+            return session
+
+        async def patched_run_async(self, *args, **kwargs):
+            self.auto_create_session = True
+            user_email = kwargs.pop("user_email", "guest@example.com")
+            user_groups = kwargs.pop("user_groups", [])
+            
+            from rag_agent.agent_rag import current_user_email, current_user_groups
+            email_token = current_user_email.set(user_email)
+            groups_token = current_user_groups.set(user_groups)
+            
+            try:
+                async for event in original_run_async(self, *args, **kwargs):
+                    yield event
+            finally:
+                current_user_email.reset(email_token)
+                current_user_groups.reset(groups_token)
+                
+        def patched_run(self, *args, **kwargs):
+            self.auto_create_session = True
+            user_email = kwargs.pop("user_email", "guest@example.com")
+            user_groups = kwargs.pop("user_groups", [])
+            
+            from rag_agent.agent_rag import current_user_email, current_user_groups
+            email_token = current_user_email.set(user_email)
+            groups_token = current_user_groups.set(user_groups)
+            
+            try:
+                return original_run(self, *args, **kwargs)
+            finally:
+                current_user_email.reset(email_token)
+                current_user_groups.reset(groups_token)
+                
+        Runner.run_async = patched_run_async
+        Runner.run = patched_run
+        if original_get_or_create:
+            Runner._get_or_create_session = patched_get_or_create_session
+        Runner._is_patched_for_acl = True
+        print("[agent_rag] Successfully applied global ACL & Auto-Session monkeypatch to google.adk.runners.Runner", flush=True)
+except Exception as e:
+    print(f"[agent_rag] Warning: failed to apply global Runner monkeypatch: {e}", flush=True)
 
 # Load local GCS-to-Confluence and GCS-to-SharePoint URL maps with dynamic GCS fallback
 gcs_to_confluence_map: dict[str, str] = {}
@@ -208,24 +279,35 @@ def _query_rag_corpus(query_str: str) -> str:
                 print(f"[agent_rag] Failed to construct RagRetrievalConfig: {e}", flush=True)
 
     try:
-        if retrieval_config:
-            response = rag.retrieval_query(
+        from google.cloud import aiplatform_v1beta1
+
+        api_filter = aiplatform_v1beta1.RagRetrievalConfig.Filter(vector_distance_threshold=0.5)
+        if enable_cel and 'cel_filter' in locals() and cel_filter:
+            api_filter.metadata_filter = cel_filter
+
+        api_retrieval_config = aiplatform_v1beta1.RagRetrievalConfig(
+            top_k=5,
+            filter=api_filter,
+        )
+
+        request = aiplatform_v1beta1.RetrieveContextsRequest(
+            vertex_rag_store=aiplatform_v1beta1.RetrieveContextsRequest.VertexRagStore(
                 rag_resources=[
-                    rag.RagResource(rag_corpus=corpus_name)
-                ],
+                    aiplatform_v1beta1.RetrieveContextsRequest.VertexRagStore.RagResource(
+                        rag_corpus=corpus_name
+                    )
+                ]
+            ),
+            parent=f"projects/{rag_project_id}/locations/{rag_corpus_location}",
+            query=aiplatform_v1beta1.RagQuery(
                 text=query_str,
-                similarity_top_k=5,
-                rag_retrieval_config=retrieval_config,
-            )
-        else:
-            response = rag.retrieval_query(
-                rag_resources=[
-                    rag.RagResource(rag_corpus=corpus_name)
-                ],
-                text=query_str,
-                similarity_top_k=5,
-                vector_distance_threshold=0.5,
-            )
+                rag_retrieval_config=api_retrieval_config,
+            ),
+        )
+
+        client_options = {"api_endpoint": f"{rag_corpus_location}-aiplatform.googleapis.com"}
+        rag_client = aiplatform_v1beta1.VertexRagServiceClient(client_options=client_options)
+        response = rag_client.retrieve_contexts(request=request)
     except Exception as e:
         print(f"[rag_agent_gcs] RAG corpus query failed: {e}", flush=True)
         return f"Search failed: {e}"

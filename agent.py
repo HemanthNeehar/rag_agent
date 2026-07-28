@@ -28,7 +28,7 @@ if service_account_path:
         if os.getenv("GOOGLE_CLOUD_LOCATION"):
             os.environ["GOOGLE_CLOUD_LOCATION"] = os.getenv("GOOGLE_CLOUD_LOCATION")
 
-project_id = os.getenv("GOOGLE_CLOUD_PROJECT", "gebu-demo-sandbox")
+project_id = os.getenv("GOOGLE_CLOUD_PROJECT", "agent-ops-494011")
 location = os.getenv("GOOGLE_CLOUD_LOCATION", "global")
 # Discovery Engine only supports "global", "us", and "eu" locations. Map other regions to "global".
 if location not in ("global", "us", "eu"):

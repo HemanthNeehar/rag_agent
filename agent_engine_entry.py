@@ -7,7 +7,7 @@ Runtime loads ``rag_agent.agent_engine_entry:a2a_agent`` - an ``A2aAgent`` bound
 from __future__ import annotations
 
 import os
-from typing import Any
+from typing import Any, AsyncIterator
 
 os.environ.setdefault("DEPLOYMENT_MODE", "vertex")
 os.environ["ADK_DISABLE_JSON_SCHEMA_FOR_FUNC_DECL"] = "1"
@@ -144,6 +144,79 @@ class PlaygroundCompatibleA2aAgent(A2aAgent):
         finally:
             current_user_email.reset(email_token)
             current_user_groups.reset(groups_token)
+
+    async def stream_query(
+        self, input: str = "", text: str = "", query: str = "", **kwargs: Any
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Standard streaming query interface for testing in the GCP Console Playground.
+        Allows custom metadata parameters like 'user_email' and 'user_groups' to be passed 
+        safely without bubbling to run_async.
+        """
+        raw_query = input or text or query or ""
+        user_query = self._extract_query_text(raw_query)
+        if not user_query:
+            yield {"content": {"parts": [{"text": "No query provided."}]}}
+            return
+
+        executor_builder = self._tmpl_attrs.get("agent_executor_builder")
+        if not executor_builder:
+            yield {"content": {"parts": [{"text": "Executor not configured."}]}}
+            return
+
+        executor = executor_builder(**self._tmpl_attrs.get("agent_executor_kwargs"))
+        executor.init_runner()
+
+        user_id = "playground_user"
+        session_id = "playground_session"
+
+        from google.genai import types
+        content = types.Content(role="user", parts=[types.Part(text=user_query)])
+
+        user_email = kwargs.get("user_email", "guest@example.com")
+        user_groups = kwargs.get("user_groups", [])
+
+        from rag_agent.agent_rag import current_user_email, current_user_groups
+        email_token = current_user_email.set(user_email)
+        groups_token = current_user_groups.set(user_groups)
+
+        try:
+            session = await executor.runner.session_service.get_session(
+                app_name=executor.runner.app_name,
+                user_id=user_id,
+                session_id=session_id,
+            ) or await executor.runner.session_service.create_session(
+                app_name=executor.runner.app_name,
+                user_id=user_id,
+                session_id=session_id,
+            )
+
+            async for event in executor.runner.run_async(
+                session_id=session.id,
+                user_id=user_id,
+                new_message=content,
+            ):
+                if event.content and event.content.parts:
+                    parts_list = []
+                    for part in event.content.parts:
+                        if hasattr(part, "text") and part.text:
+                            parts_list.append({"text": part.text})
+                    if parts_list:
+                        yield {"content": {"parts": parts_list}}
+        except Exception as e:
+            yield {"content": {"parts": [{"text": f"Error running query: {str(e)}"}]}}
+        finally:
+            current_user_email.reset(email_token)
+            current_user_groups.reset(groups_token)
+
+    async def async_stream_query(
+        self, input: str = "", text: str = "", query: str = "", **kwargs: Any
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Standard async streaming query interface for serving container.
+        Allows custom metadata parameters like 'user_email' and 'user_groups' to be passed 
+        safely without bubbling to run_async.
+        """
+        async for chunk in self.stream_query(input=input, text=text, query=query, **kwargs):
+            yield chunk
 
 
 a2a_agent = PlaygroundCompatibleA2aAgent(

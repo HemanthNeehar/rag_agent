@@ -58,7 +58,7 @@ os.environ["ADK_DISABLE_JSON_SCHEMA_FOR_FUNC_DECL"] = "1"
 
 import vertexai
 
-PROJECT_ID = os.getenv("GOOGLE_CLOUD_PROJECT", "").strip() or "gebu-demo-sandbox"
+PROJECT_ID = os.getenv("GOOGLE_CLOUD_PROJECT", "").strip() or "agent-ops-494011"
 LOCATION = os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1").strip()
 CREDENTIALS_FILE = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "").strip()
 
@@ -173,6 +173,7 @@ for optional_key in (
     "RAG_CORPUS_ID",
     "RAG_GCS_BUCKET_NAME",
     "RAG_DATA_STORE_LOCATION",
+    "ENABLE_CEL_METADATA_FILTERING",
 ):
     v = _plain(optional_key)
     if v:

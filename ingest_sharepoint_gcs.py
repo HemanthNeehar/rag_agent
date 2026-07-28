@@ -344,35 +344,157 @@ def _parse_pptx_locally(file_path: Path) -> str:
         return f"Local PPTX parsing failed: {e}"
     return "\n\n".join(texts)
 
+def generate_llm_vsdx_summary(shape_texts_str: str, file_name: str, image_bytes: bytes | None = None, mime_type: str = "image/png") -> str:
+    """Generates a high-fidelity architectural flow narrative for Visio/Draw.io diagrams using Gemini 2.5 Pro Multimodal Vision."""
+    project_id = os.getenv("GOOGLE_CLOUD_PROJECT") or os.getenv("RAG_PROJECT_ID") or os.getenv("GCP_PROJECT") or "agent-ops-494011"
+    location = os.getenv("GOOGLE_CLOUD_LOCATION") or os.getenv("RAG_LOCATION") or "us-central1"
+    vision_model = os.getenv("GEMINI_MODEL_PRO", "gemini-2.5-pro")
+
+    has_img_str = " + Thumbnail Image Canvas" if image_bytes else ""
+    print(f"      ➜ [Gemini Pro Vision] Summarizing diagram '{file_name}' using {vision_model}{has_img_str}...")
+
+    prompt = f"""You are an Enterprise Solutions Architect analyzing a High-Level Design (HLD/LLD) diagram: {file_name}.
+
+CRITICAL VERBATIM EXTRACTION REQUIREMENTS:
+1. VERBATIM TERMS & ACRONYMS: Extract and retain ALL visible text, shape headers, field labels, acronyms, and callout terms VERBATIM. Do NOT omit, summarize away, or paraphrase technical terms, IDs, or search inputs (e.g., 'CSNOs', 'find by CSNOs', 'BMUI', 'HSI', 'LCI', API endpoints, table names, button text).
+2. VISUAL & SPATIAL FLOW: Below are the extracted shape text labels pre-sorted in visual spatial order (Top->Bottom, Left->Right):
+
+{shape_texts_str}
+
+3. COMPREHENSIVE ARCHITECTURAL NARRATIVE:
+   - Identify all system components, microservices, databases, UI forms, and external gateways.
+   - Describe the step-by-step workflow sequences and API call sequences.
+   - Document conditional logic, decision branches ('If success', 'If error', 'Update LCI', etc.), and error handling flows.
+   - Ensure every domain acronym, UI search label, and subsystem tag mentioned in the diagram or image is explicitly documented.
+
+Format clearly in structured Markdown with headers and bullet points."""
+
+    # Tier 1: google-genai SDK
+    try:
+        from google import genai
+        from google.genai import types
+        api_key = os.getenv("GEMINI_API_KEY")
+        if api_key:
+            client = genai.Client(api_key=api_key)
+        else:
+            client = genai.Client(vertexai=True, project=project_id, location=location)
+
+        contents = []
+        if image_bytes:
+            contents.append(types.Part.from_bytes(data=image_bytes, mime_type=mime_type))
+        contents.append(prompt)
+
+        response = client.models.generate_content(model=vision_model, contents=contents)
+        if response and response.text:
+            print(f"      ✔ [Gemini Pro Vision] Generated {len(response.text)} chars architectural narrative for '{file_name}'.")
+            return response.text
+    except Exception as e1:
+        print(f"      [Info] google.genai Client failed for '{file_name}' ({e1}). Attempting vertexai fallback...")
+
+    # Tier 2: Official vertexai SDK (vertexai.generative_models)
+    try:
+        import vertexai
+        from vertexai.generative_models import GenerativeModel, Part
+        vertexai.init(project=project_id, location=location)
+        model = GenerativeModel(vision_model)
+        
+        contents = []
+        if image_bytes:
+            contents.append(Part.from_data(data=image_bytes, mime_type=mime_type))
+        contents.append(prompt)
+
+        response = model.generate_content(contents)
+        if response and response.text:
+            print(f"      ✔ [Gemini Pro Vision] Fallback generated {len(response.text)} chars architectural narrative for '{file_name}'.")
+            return response.text
+    except Exception as e2:
+        print(f"      [Warning] Both Gemini Vision SDK attempts failed for '{file_name}': {e2}. Diagram will contain spatial labels only.")
+
+    return ""
+
+
 def _parse_vsdx_locally(file_path: Path) -> str:
-    """Extracts text labels from Visio (.vsdx) files using zipfile and ElementTree xml parsing."""
+    """Extracts text labels from Visio (.vsdx) files using spatial (PinX, PinY) coordinate sorting,
+    extracts embedded preview images (docProps/thumbnail.png / visio/media/), and calls Gemini Vision."""
     import zipfile
     import xml.etree.ElementTree as ET
-    texts = []
+    spatial_texts = []
+    extracted_image_bytes = None
+    image_mime_type = "image/png"
+
     try:
         with zipfile.ZipFile(file_path) as vsdx:
-            # Look for pages XML files
+            # 1. Extract thumbnail / preview image if available
+            for name in vsdx.namelist():
+                if name.lower().endswith((".png", ".jpg", ".jpeg")):
+                    if "thumbnail" in name.lower() or "visio/media/" in name.lower() or "media" in name.lower():
+                        extracted_image_bytes = vsdx.read(name)
+                        if name.lower().endswith(".jpg") or name.lower().endswith(".jpeg"):
+                            image_mime_type = "image/jpeg"
+                        break
+
+            # 2. Extract shape text with spatial coordinates (PinX, PinY)
             xml_files = [name for name in vsdx.namelist() if name.startswith('visio/pages/page') and name.endswith('.xml')]
             for page_file in sorted(xml_files):
                 page_data = vsdx.read(page_file)
-                root = ET.fromstring(page_data)
+                clean_xml = re.sub(r'xmlns(:\w+)?="[^"]+"', '', page_data.decode('utf-8', errors='ignore'))
+                root = ET.fromstring(clean_xml)
                 
-                # Namespace mapping for Visio XML
-                ns = {'v': 'http://schemas.microsoft.com/office/visio/2012/main'}
+                shapes = []
+                for shape in root.findall('.//Shape'):
+                    pin_x = 0.0
+                    pin_y = 0.0
+                    for cell in shape.findall('.//Cell'):
+                        n = cell.get('N', '')
+                        v = cell.get('V', '0')
+                        if n == 'PinX':
+                            try: pin_x = float(v)
+                            except: pass
+                        elif n == 'PinY':
+                            try: pin_y = float(v)
+                            except: pass
+
+                    text_elems = shape.findall('.//Text')
+                    elem_texts = []
+                    for t in text_elems:
+                        txt = "".join(t.itertext()).strip()
+                        if txt:
+                            elem_texts.append(txt)
+                    
+                    # Fallback for cell values or custom shape property labels if Text element was empty
+                    if not elem_texts:
+                        for cell_val in shape.findall(".//Cell[@N='Value']"):
+                            v_val = cell_val.get('V', '').strip()
+                            if v_val and len(v_val) > 1 and not v_val.replace('.', '').isdigit():
+                                elem_texts.append(v_val)
+                    
+                    if elem_texts:
+                        full_txt = " | ".join(elem_texts)
+                        shapes.append((pin_y, pin_x, full_txt))
                 
-                page_texts = []
-                # Find all Text elements
-                for text_elem in root.findall('.//v:Text', ns):
-                    # Extract text content recursively
-                    elem_text = "".join(text_elem.itertext()).strip()
-                    if elem_text:
-                        page_texts.append(elem_text)
+                # Sort shapes spatially: Top-to-Bottom (-pin_y), Left-to-Right (pin_x)
+                shapes.sort(key=lambda s: (-s[0], s[1]))
                 
-                if page_texts:
-                    texts.append(f"### Visio Page: {os.path.basename(page_file).replace('.xml', '')}\n" + "\n".join(page_texts))
+                page_label_lines = [s[2] for s in shapes]
+                if page_label_lines:
+                    spatial_texts.append(f"### Visio Page ({os.path.basename(page_file)} spatially sorted Top->Bottom, Left->Right):\n" + "\n".join(page_label_lines))
+
     except Exception as e:
-        print(f"      [Warning] Local Visio VSDX parse failed: {e}")
+        print(f"      [Warning] Spatial VSDX parse failed: {e}")
         return f"Local Visio parsing failed: {e}"
+
+    raw_shape_content = "\n\n".join(spatial_texts)
+    
+    llm_summary = generate_llm_vsdx_summary(
+        shape_texts_str=raw_shape_content,
+        file_name=file_path.name,
+        image_bytes=extracted_image_bytes,
+        mime_type=image_mime_type
+    )
+
+    if llm_summary:
+        return f"## Architectural Workflow Narrative (Gemini Multimodal Generated)\n{llm_summary}\n\n## Spatially-Ordered Visio Elements\n{raw_shape_content}"
+    return raw_shape_content
     
     if not texts:
         return "Empty Visio Diagram or text extraction yielded no results."
@@ -430,7 +552,13 @@ def _parse_drawio_locally(file_path: Path) -> str:
         
     if not texts:
         return "Empty Draw.io diagram or no text labels found."
-    return "### Draw.io Diagram Labels:\n" + "\n".join(texts)
+    
+    raw_drawio_content = "### Draw.io Diagram Labels:\n" + "\n".join(texts)
+    llm_summary = generate_llm_vsdx_summary(raw_drawio_content, file_path.name)
+    
+    if llm_summary:
+        return f"## Architectural Workflow Narrative (Gemini Generated)\n{llm_summary}\n\n## Raw Draw.io Page Elements\n{raw_drawio_content}"
+    return raw_drawio_content
 
 def extract_images_from_attachment(file_path: Path, temp_images_dir: Path) -> list:
     """Extracts embedded images from PDF, DOCX, or PPTX and saves them.
@@ -1939,4 +2067,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 

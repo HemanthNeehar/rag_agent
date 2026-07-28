@@ -25,7 +25,7 @@ load_dotenv(_deploy_dir / ".env", override=True)
 import vertexai
 from vertexai._genai import agent_engines as ae_module
 
-PROJECT_ID = os.getenv("GOOGLE_CLOUD_PROJECT", "gebu-demo-sandbox").strip()
+PROJECT_ID = os.getenv("GOOGLE_CLOUD_PROJECT", "agent-ops-494011").strip()
 LOCATION = os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1").strip()
 STAGING_BUCKET = os.getenv("RAG_GCS_BUCKET_NAME", "multi-agent-sdlc")
 DISPLAY_NAME = "Corporate RAG Agent (ADK)"
@@ -63,12 +63,15 @@ _RESERVED = frozenset({
 _wanted_keys = (
     "GEMINI_MODEL",
     "GOOGLE_GENAI_USE_VERTEXAI",
+    "RAG_PROJECT_ID",
+    "RAG_CORPUS_LOCATION",
     "RAG_CORPUS_ID",
     "RAG_GCS_BUCKET_NAME",
     "RAG_DATA_STORE_ID",
     "RAG_DATA_STORE_LOCATION",
     "FIRESTORE_DATABASE_ID",
     "ADK_DISABLE_JSON_SCHEMA_FOR_FUNC_DECL",
+    "ENABLE_CEL_METADATA_FILTERING",
 )
 env_vars: dict[str, str] = {
     "GOOGLE_GENAI_USE_VERTEXAI": "TRUE",
@@ -102,11 +105,10 @@ try:
     # Only this path sends agentFramework="google-adk" to the Vertex AI API,
     # which is what makes the GCP Console show the Playground tab.
     from vertexai.preview import reasoning_engines
+    from typing import Any, AsyncIterator
 
     adk_app = reasoning_engines.AdkApp(
         agent=root_agent,
-        enable_tracing=False,
-        env_vars=env_vars,
     )
 
     client = vertexai.Client(project=PROJECT_ID, location=LOCATION)

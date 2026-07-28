@@ -144,6 +144,39 @@ def save_catalog_progress(tagged_catalog, catalog_gcs_uri):
         print(f"     [Warning] Failed uploading incremental progress to GCS: {save_err}")
 
 
+def load_imported_catalog_progress(catalog_gcs_uri: str) -> set:
+    """Loads previous RAG import checkpoint catalog state from GCS."""
+    try:
+        res = subprocess.run(
+            ["gcloud", "storage", "cat", catalog_gcs_uri],
+            capture_output=True, text=True, check=True
+        )
+        if res.stdout.strip():
+            return set(json.loads(res.stdout))
+    except Exception:
+        pass
+    return set()
+
+
+def save_imported_catalog_progress(imported_catalog: set, catalog_gcs_uri: str):
+    """Saves current RAG import checkpoint catalog state to GCS."""
+    try:
+        temp_dir = Path("/tmp")
+        if not temp_dir.exists():
+            temp_dir.mkdir(parents=True, exist_ok=True)
+        temp_file = temp_dir / "rag_imported_files_catalog.json"
+        temp_file.write_text(json.dumps(sorted(list(imported_catalog))))
+        
+        subprocess.run(
+            ["gcloud", "storage", "cp", str(temp_file), catalog_gcs_uri],
+            capture_output=True, check=True
+        )
+        if temp_file.exists():
+            temp_file.unlink()
+    except Exception as save_err:
+        print(f"     [Warning] Failed uploading import catalog progress to GCS: {save_err}")
+
+
 def save_push_failures(gcs_bucket):
     """Writes push_failures list to GCS bucket as gcs_push_rag_failure_results.json."""
     try:
@@ -248,8 +281,8 @@ def trigger_confluence_gcs_to_rag_engine():
     """
     project_id = os.getenv("GOOGLE_CLOUD_PROJECT")
     # Resolve and align location dynamically. Match both client init and corpus location.
-    location = os.getenv("GOOGLE_CLOUD_LOCATION", "us-south1")
-    corpus_id = os.getenv("RAG_CORPUS_ID", "7991637538768945152")
+    location = os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
+    corpus_id = os.getenv("RAG_CORPUS_ID", "6301661778598166528")
     gcs_bucket = os.getenv("RAG_GCS_BUCKET_NAME", "multi-agent-sdlc-bucket")
 
     if not project_id:
@@ -261,8 +294,38 @@ def trigger_confluence_gcs_to_rag_engine():
     print(f"Initializing Vertex AI: project={project_id}, location={location}")
     retry_api_call(vertexai.init, project=project_id, location=location)
 
+    # 1. State Tracking for RAG Import Checkpointing & Resuming
+    imported_catalog = set()
+    catalog_gcs_uri = f"gs://{gcs_bucket}/rag_imported_files_catalog.json"
+    is_force_reingest = os.getenv("FORCE_REINGEST", "false").lower() == "true"
+
+    if not is_force_reingest:
+        print(f"\nChecking for existing RAG import checkpoint catalog at {catalog_gcs_uri}...")
+        imported_catalog = load_imported_catalog_progress(catalog_gcs_uri)
+        if imported_catalog:
+            print(f"  Loaded {len(imported_catalog)} entries from import checkpoint catalog.")
+
+        print("  Syncing with live RAG Corpus files to build ground-truth resume state...")
+        try:
+            corpus_files = get_all_corpus_files(corpus_name)
+            for rf in corpus_files:
+                display_name = getattr(rf, "display_name", "")
+                if display_name:
+                    imported_catalog.add(display_name)
+                    imported_catalog.add(f"gs://{gcs_bucket}/{display_name}")
+            print(f"  Live corpus sync complete. Ground-truth imported files tracked: {len(imported_catalog)}")
+            save_imported_catalog_progress(imported_catalog, catalog_gcs_uri)
+        except Exception as sync_err:
+            print(f"  [Warning] Failed syncing live RAG corpus files: {sync_err}")
+    else:
+        print("  FORCE_REINGEST is true. Resetting import catalog to process all files from scratch.")
+        try:
+            subprocess.run(["gcloud", "storage", "rm", catalog_gcs_uri], capture_output=True)
+        except Exception:
+            pass
+
     # Optional: clean purge of existing RAG corpus files when FORCE_REINGEST is set
-    if os.getenv("FORCE_REINGEST", "false").lower() == "true":
+    if is_force_reingest:
         print("  -> FORCE_REINGEST is true. Purging existing files in the RAG corpus for a clean sync...")
         try:
             existing_files = get_all_corpus_files(corpus_name)
@@ -282,23 +345,29 @@ def trigger_confluence_gcs_to_rag_engine():
 
     # Enumerate only the .md files at the bucket root (not the images/ subdirectory).
     print(f"Scanning gs://{gcs_bucket}/ for .md files to import...")
-    md_uris: list[str] = []
+            corpus_files = get_all_corpus_files(corpus_name)
+            print(f"  -> Found {len(corpus_files)} files in RAG corpus to purge...")
+            for rf in corpus_files:
+                try:
+                    rag.delete_file(name=rf.name)
+                except Exception as del_e:
+                    print(f"     [Warning] Could not delete {rf.name}: {del_e}")
+            print("  -> Purge complete.")
+        except Exception as purge_e:
+            print(f"  [Warning] Failed purging corpus files: {purge_e}")
+
+    # List all .md files directly in bucket root
+    print("\nScanning GCS bucket for .md files to ingest...")
+    md_uris = []
     try:
-        result = subprocess.run(
-            ["gcloud", "storage", "ls", f"gs://{gcs_bucket}/"],
-            capture_output=True, text=True, check=True,
-        )
-        for obj_uri in result.stdout.splitlines():
+        res = subprocess.run(["gcloud", "storage", "ls", f"gs://{gcs_bucket}/*.md"], capture_output=True, text=True, check=True)
+        for obj_uri in res.stdout.splitlines():
             obj_uri = obj_uri.strip()
             if not obj_uri or obj_uri.endswith("/"):
                 continue  # skip subdirectory entries
             obj_name = obj_uri.removeprefix(f"gs://{gcs_bucket}/")
             # Skip anything under images/ (binary files)
             if obj_name.startswith("images/"):
-                continue
-            # Skip non-markdown files
-            if not obj_name.endswith(".md"):
-                print(f"  -> Skipping non-md file: {obj_name}")
                 continue
             # Apostrophe or backtick in name will fail RAG import — remove them
             if "'" in obj_name or "`" in obj_name:
@@ -308,46 +377,108 @@ def trigger_confluence_gcs_to_rag_engine():
                 continue
             md_uris.append(obj_uri)
     except Exception as e:
-        print(f"  [Warning] Could not scan bucket: {e}. Falling back to full bucket URI.")
-        md_uris = [gcs_uri]
+        print(f"  [Warning] Could not scan bucket: {e}.")
 
     if not md_uris:
         print("  [Error] No .md files found in bucket root. Did ingestion run successfully?")
         return
 
-    print(f"  Found {len(md_uris)} .md file(s) to import.")
-    print(f"Target corpus    : {corpus_name}")
+    # Filter out files that have ALREADY been imported into the RAG corpus
+    pending_md_uris = []
+    skipped_uris = []
+    for uri in md_uris:
+        fname = uri.split("/")[-1]
+        if uri in imported_catalog or fname in imported_catalog:
+            skipped_uris.append(uri)
+        else:
+            pending_md_uris.append(uri)
 
-    # Ingest files in batches of 20 to respect the 25 GCS URIs per call API limit
+    print("\n" + "=" * 70)
+    print("RAG ENGINE IMPORT RESUME CHECKPOINT SUMMARY:")
+    print(f"  • Total GCS .md files discovered : {len(md_uris)}")
+    print(f"  • Already imported (SKIPPING)    : {len(skipped_uris)}")
+    print(f"  • Pending import (TO PROCESS)    : {len(pending_md_uris)}")
+    print("=" * 70 + "\n")
+
+    if not pending_md_uris:
+        print("✔ All files are already imported into the RAG corpus! Skipping batch import step.")
+        apply_metadata_to_corpus_files()
+        save_push_failures(gcs_bucket)
+        return
+
+    # Ingest remaining files in sequential batches of 20 with LRO lock retry logic
     batch_size = 20
     imported_count = 0
     failed_count = 0
     
-    print(f"  -> Launching import in batches of {batch_size} with pacing delay to protect quotas...")
-    for i in range(0, len(md_uris), batch_size):
-        batch = md_uris[i:i + batch_size]
-        batch_num = (i // batch_size) + 1
-        total_batches = (len(md_uris) + batch_size - 1) // batch_size
+    batches = [pending_md_uris[i:i + batch_size] for i in range(0, len(pending_md_uris), batch_size)]
+    total_batches = len(batches)
+    print(f"  -> Launching SEQUENTIAL import of {len(pending_md_uris)} files ({total_batches} batches of {batch_size}) to respect Vertex AI Corpus LRO mutex locks...")
+
+    for batch_idx, batch in enumerate(batches):
+        batch_num = batch_idx + 1
         print(f"     -> Importing batch {batch_num}/{total_batches} ({len(batch)} files)...")
-        try:
-            response = retry_api_call(
-                rag.import_files,
-                corpus_name=corpus_name,
-                paths=batch,
-                chunk_size=512,
-                chunk_overlap=100,
-                max_embedding_requests_per_min=900,
-            )
-            imported_count += response.imported_rag_files_count
-            failed_count += response.failed_rag_files_count
-            print(f"        Batch complete. Imported: {response.imported_rag_files_count}, Failed: {response.failed_rag_files_count}")
+        
+        # Retry loop for LRO lock contention or temporary API issues
+        max_retries = 5
+        retry_delay = 10
+        response = None
+        
+        for attempt in range(max_retries):
+            try:
+                response = retry_api_call(
+                    rag.import_files,
+                    corpus_name=corpus_name,
+                    paths=batch,
+                    chunk_size=512,
+                    chunk_overlap=100,
+                    max_embedding_requests_per_min=900,
+                )
+                break  # Batch import succeeded
+            except Exception as e:
+                err_msg = str(e)
+                if "FailedPrecondition" in err_msg or "other operations running" in err_msg:
+                    print(f"        [LRO Lock Wait] Corpus operation currently in progress. Waiting {retry_delay}s before retry (Attempt {attempt + 1}/{max_retries})...")
+                    time.sleep(retry_delay)
+                    retry_delay *= 1.5
+                else:
+                    if attempt == max_retries - 1:
+                        print(f"        [Error] Batch {batch_num} failed after {max_retries} attempts: {e}")
+                        failed_count += len(batch)
+                        with push_failures_lock:
+                            for file_uri in batch:
+                                file_name = file_uri.split("/")[-1]
+                                push_failures.append({
+                                    "file_name": file_name,
+                                    "error_code": "BatchException",
+                                    "failure_reason": str(e),
+                                    "rag_progress_fail_code": "RAG_BATCH_IMPORT"
+                                })
+                        response = None
+                    else:
+                        time.sleep(5)
+
+        if response is not None:
+            batch_imported = getattr(response, "imported_rag_files_count", len(batch))
+            batch_failed = getattr(response, "failed_rag_files_count", 0)
+            imported_count += batch_imported
+            failed_count += batch_failed
+            print(f"        ✔ Batch {batch_num} complete. Imported: {batch_imported}, Failed: {batch_failed}")
             
-            if response.failed_rag_files_count > 0:
+            # Record successfully imported files into state catalog
+            if batch_failed == 0:
+                for file_uri in batch:
+                    fname = file_uri.split("/")[-1]
+                    imported_catalog.add(file_uri)
+                    imported_catalog.add(fname)
+            else:
                 gcs_path = getattr(response, "partial_failures_gcs_path", "")
+                failed_fnames = set()
                 failures_list = []
                 if gcs_path:
-                    print(f"        -> Extracting {response.failed_rag_files_count} detailed failures from {gcs_path}...")
                     failures_list = parse_partial_failures(gcs_path, batch)
+                    for fname, _, _ in failures_list:
+                        failed_fnames.add(fname)
                 
                 with push_failures_lock:
                     if failures_list:
@@ -359,31 +490,23 @@ def trigger_confluence_gcs_to_rag_engine():
                                 "rag_progress_fail_code": "RAG_BATCH_IMPORT"
                             })
                     else:
-                        print(f"        -> Appending placeholder details for the {response.failed_rag_files_count} failed files in this batch...")
-                        # Map back to filenames in this batch as fallback
-                        for file_uri in batch[:response.failed_rag_files_count]:
+                        for file_uri in batch[:batch_failed]:
                             file_name = file_uri.split("/")[-1]
                             push_failures.append({
                                 "file_name": file_name,
                                 "error_code": "ImportError",
-                                "failure_reason": f"Import failed during batch {batch_num}. See partial failures GCS path: {gcs_path or 'N/A'}",
+                                "failure_reason": f"Import failed during batch {batch_num}. See GCS path: {gcs_path or 'N/A'}",
                                 "rag_progress_fail_code": "RAG_BATCH_IMPORT"
                             })
-        except Exception as e:
-            print(f"        [Error] Batch {batch_num} failed: {e}")
-            failed_count += len(batch)
-            with push_failures_lock:
+
                 for file_uri in batch:
-                    file_name = file_uri.split("/")[-1]
-                    push_failures.append({
-                        "file_name": file_name,
-                        "error_code": type(e).__name__,
-                        "failure_reason": f"Batch {batch_num} import failed: {str(e)}",
-                        "rag_progress_fail_code": "RAG_BATCH_IMPORT"
-                    })
-            
-        # Small sleep between batches to natively space out rate limit windows
-        time.sleep(2.0)
+                    fname = file_uri.split("/")[-1]
+                    if fname not in failed_fnames:
+                        imported_catalog.add(file_uri)
+                        imported_catalog.add(fname)
+
+            # Persist checkpoint state to GCS after each batch succeeds
+            save_imported_catalog_progress(imported_catalog, catalog_gcs_uri)
 
     print(f"\nIngestion complete.")
     print(f"  Imported : {imported_count} file(s)")
@@ -408,8 +531,8 @@ def apply_metadata_to_corpus_files():
     to make tagging resumeable and skip already-tagged files.
     """
     project_id = os.getenv("GOOGLE_CLOUD_PROJECT")
-    location = os.getenv("GOOGLE_CLOUD_LOCATION", "us-south1")
-    corpus_id = os.getenv("RAG_CORPUS_ID", "7991637538768945152")
+    location = os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
+    corpus_id = os.getenv("RAG_CORPUS_ID", "6301661778598166528")
     gcs_bucket = os.getenv("RAG_GCS_BUCKET_NAME", "multi-agent-sdlc-bucket")
     corpus_name = f"projects/{project_id}/locations/{location}/ragCorpora/{corpus_id}"
 

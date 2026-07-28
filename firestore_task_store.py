@@ -9,7 +9,7 @@ class FirestoreTaskStore(TaskStore):
     """Distributed, persistent Firestore implementation of A2A TaskStore."""
 
     def __init__(self, collection_name: str = "a2a_tasks") -> None:
-        project = os.getenv("GOOGLE_CLOUD_PROJECT") or "gebu-demo-sandbox"
+        project = os.getenv("GOOGLE_CLOUD_PROJECT") or "agent-ops-494011"
         database = (
             os.getenv("FIRESTORE_DATABASE_ID")
             or "ai-studio-c65c8c94-4557-4ed7-87bc-594554053988"

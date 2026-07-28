@@ -15,7 +15,7 @@ if _sa:
         os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(_sa_path)
         os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "TRUE"
 
-PROJECT = os.getenv("GOOGLE_CLOUD_PROJECT", "gebu-demo-sandbox")
+PROJECT = os.getenv("GOOGLE_CLOUD_PROJECT", "agent-ops-494011")
 LOCATION = os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
 RESOURCE_NAME = os.getenv("RAG_AGENT_RESOURCE_NAME", "")
 
